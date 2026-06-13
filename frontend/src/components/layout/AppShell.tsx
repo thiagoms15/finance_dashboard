@@ -2,6 +2,7 @@ import { NavLink, Outlet } from "react-router-dom";
 
 import { Button } from "../ui/primitives";
 import { useSessionStore } from "../../features/auth/store";
+import { displayName } from "./displayName";
 
 const navItems = [
   { to: "/", label: "Dashboard" },
@@ -10,24 +11,6 @@ const navItems = [
   { to: "/reports", label: "Reports" },
   { to: "/settings", label: "Settings" }
 ];
-
-function displayName(name: string | undefined, email: string | undefined) {
-  if (name?.trim()) {
-    return name.trim();
-  }
-
-  const localPart = email?.split("@")[0]?.trim();
-  if (!localPart) {
-    return "Investor";
-  }
-
-  return localPart
-    .replace(/[._-]+/g, " ")
-    .split(" ")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
 
 export function AppShell() {
   const user = useSessionStore((state) => state.user);
