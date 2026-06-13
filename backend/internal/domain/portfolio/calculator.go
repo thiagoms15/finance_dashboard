@@ -156,27 +156,135 @@ func Calculate(
 	return Snapshot{Positions: result, Summary: summary}, nil
 }
 
-func BuildPerformanceSeries(transactions []domain.Transaction, preferredCurrency string, convert func(amount decimal.Decimal, from, to string) decimal.Decimal) []PerformancePoint {
-	points := make([]PerformancePoint, 0, len(transactions))
-	cumulative := decimal.Zero
+func BuildPerformanceSeries(
+	transactions []domain.Transaction,
+	prices []domain.AssetPrice,
+	preferredCurrency string,
+	convert func(amount decimal.Decimal, from, to string) decimal.Decimal,
+) []PerformancePoint {
+	if len(transactions) == 0 {
+		return []PerformancePoint{}
+	}
 
-	for _, txn := range transactions {
+	orderedTransactions := append([]domain.Transaction(nil), transactions...)
+	sort.SliceStable(orderedTransactions, func(i, j int) bool {
+		if orderedTransactions[i].TransactionDate.Equal(orderedTransactions[j].TransactionDate) {
+			return orderedTransactions[i].CreatedAt.Before(orderedTransactions[j].CreatedAt)
+		}
+		return orderedTransactions[i].TransactionDate.Before(orderedTransactions[j].TransactionDate)
+	})
+
+	priceHistory := map[uuid.UUID][]domain.AssetPrice{}
+	for _, price := range prices {
+		priceHistory[price.AssetID] = append(priceHistory[price.AssetID], price)
+	}
+	for assetID := range priceHistory {
+		sort.Slice(priceHistory[assetID], func(i, j int) bool {
+			return priceHistory[assetID][i].Timestamp.Before(priceHistory[assetID][j].Timestamp)
+		})
+	}
+
+	type knownPrice struct {
+		value    decimal.Decimal
+		currency string
+	}
+
+	holdings := map[uuid.UUID]decimal.Decimal{}
+	priceCursor := map[uuid.UUID]int{}
+	latestKnownPrice := map[uuid.UUID]knownPrice{}
+	lastTradePrice := map[uuid.UUID]knownPrice{}
+	points := make([]PerformancePoint, 0, len(orderedTransactions))
+
+	for _, txn := range orderedTransactions {
 		switch txn.Type {
 		case domain.TransactionTypeBuy:
-			cumulative = cumulative.Add(convert(txn.Quantity.Mul(txn.Price).Add(txn.Fees), txn.Currency, preferredCurrency))
+			holdings[txn.AssetID] = holdings[txn.AssetID].Add(txn.Quantity)
 		case domain.TransactionTypeSell:
-			cumulative = cumulative.Sub(convert(txn.Quantity.Mul(txn.Price).Sub(txn.Fees), txn.Currency, preferredCurrency))
+			remaining := holdings[txn.AssetID].Sub(txn.Quantity)
+			if remaining.IsNegative() {
+				remaining = decimal.Zero
+			}
+			holdings[txn.AssetID] = remaining
+		}
+
+		lastTradePrice[txn.AssetID] = knownPrice{
+			value:    txn.Price,
+			currency: txn.Currency,
+		}
+
+		pointValue := decimal.Zero
+		for assetID, quantity := range holdings {
+			if !quantity.GreaterThan(decimal.Zero) {
+				continue
+			}
+
+			history := priceHistory[assetID]
+			if len(history) > 0 {
+				cursor := priceCursor[assetID]
+				for cursor < len(history) && (history[cursor].Timestamp.Before(txn.TransactionDate) || history[cursor].Timestamp.Equal(txn.TransactionDate)) {
+					latestKnownPrice[assetID] = knownPrice{
+						value:    history[cursor].Price,
+						currency: history[cursor].Currency,
+					}
+					cursor++
+				}
+				priceCursor[assetID] = cursor
+			}
+
+			price, ok := latestKnownPrice[assetID]
+			if !ok {
+				price, ok = lastTradePrice[assetID]
+			}
+			if !ok {
+				continue
+			}
+
+			value := quantity.Mul(price.value)
+			pointValue = pointValue.Add(convert(value, price.currency, preferredCurrency))
 		}
 
 		points = append(points, PerformancePoint{
 			Date:  txn.TransactionDate,
-			Value: cumulative,
+			Value: pointValue,
 		})
 	}
 
-	sort.Slice(points, func(i, j int) bool {
-		return points[i].Date.Before(points[j].Date)
-	})
+	latestDate := points[len(points)-1].Date
+	currentValue := decimal.Zero
+	for assetID, quantity := range holdings {
+		if !quantity.GreaterThan(decimal.Zero) {
+			continue
+		}
+
+		price, ok := latestKnownPrice[assetID]
+		history := priceHistory[assetID]
+		if len(history) > 0 {
+			last := history[len(history)-1]
+			// Prefer the most recent market price for the final point, even if after last transaction.
+			price = knownPrice{
+				value:    last.Price,
+				currency: last.Currency,
+			}
+			if last.Timestamp.After(latestDate) {
+				latestDate = last.Timestamp
+			}
+			ok = true
+		}
+		if !ok {
+			price, ok = lastTradePrice[assetID]
+		}
+		if !ok {
+			continue
+		}
+		currentValue = currentValue.Add(convert(quantity.Mul(price.value), price.currency, preferredCurrency))
+	}
+
+	if latestDate.After(points[len(points)-1].Date) || !currentValue.Equal(points[len(points)-1].Value) {
+		points = append(points, PerformancePoint{
+			Date:  latestDate,
+			Value: currentValue,
+		})
+	}
 
 	return points
 }

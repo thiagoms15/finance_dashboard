@@ -10,6 +10,74 @@ import (
 	"github.com/thiago/finance/backend/internal/domain"
 )
 
+func TestBuildPerformanceSeriesUsesPriceHistoryForPortfolioValue(t *testing.T) {
+	t.Parallel()
+
+	assetID := uuid.New()
+	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	txns := []domain.Transaction{
+		{
+			AssetID:         assetID,
+			Type:            domain.TransactionTypeBuy,
+			Quantity:        decimal.RequireFromString("10"),
+			Price:           decimal.RequireFromString("100"),
+			Currency:        "USD",
+			TransactionDate: start,
+			CreatedAt:       start,
+		},
+		{
+			AssetID:         assetID,
+			Type:            domain.TransactionTypeBuy,
+			Quantity:        decimal.RequireFromString("5"),
+			Price:           decimal.RequireFromString("120"),
+			Currency:        "USD",
+			TransactionDate: start.Add(24 * time.Hour),
+			CreatedAt:       start.Add(24 * time.Hour),
+		},
+	}
+
+	prices := []domain.AssetPrice{
+		{
+			AssetID:   assetID,
+			Price:     decimal.RequireFromString("100"),
+			Currency:  "USD",
+			Timestamp: start,
+		},
+		{
+			AssetID:   assetID,
+			Price:     decimal.RequireFromString("130"),
+			Currency:  "USD",
+			Timestamp: start.Add(24 * time.Hour),
+		},
+		{
+			AssetID:   assetID,
+			Price:     decimal.RequireFromString("150"),
+			Currency:  "USD",
+			Timestamp: start.Add(48 * time.Hour),
+		},
+	}
+
+	series := BuildPerformanceSeries(txns, prices, "USD", func(amount decimal.Decimal, _, _ string) decimal.Decimal {
+		return amount
+	})
+
+	if got, want := len(series), 3; got != want {
+		t.Fatalf("series length = %d, want %d", got, want)
+	}
+
+	if got, want := series[0].Value.StringFixed(0), "1000"; got != want {
+		t.Fatalf("first point value = %s, want %s", got, want)
+	}
+	// 15 shares valued at latest known market price 130.
+	if got, want := series[1].Value.StringFixed(0), "1950"; got != want {
+		t.Fatalf("second point value = %s, want %s", got, want)
+	}
+	// Final synthetic point must reflect latest market value even without new transactions.
+	if got, want := series[2].Value.StringFixed(0), "2250"; got != want {
+		t.Fatalf("last point value = %s, want %s", got, want)
+	}
+}
 func TestCalculateSnapshot(t *testing.T) {
 	t.Parallel()
 

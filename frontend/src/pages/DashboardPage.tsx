@@ -7,19 +7,18 @@ import { IncomeCard } from "../components/widgets/IncomeCard";
 import { SummaryCards } from "../components/widgets/SummaryCards";
 import { TopMovers } from "../components/widgets/TopMovers";
 import { useSessionStore } from "../features/auth/store";
-import { usePortfolio, usePortfolioPerformance, usePortfolioSummary } from "../features/portfolio/hooks";
+import { usePortfolio, usePortfolioPerformance } from "../features/portfolio/hooks";
 
 export function DashboardPage() {
   const currency = useSessionStore((state) => state.preferredCurrency);
-  const summaryQuery = usePortfolioSummary(currency);
   const portfolioQuery = usePortfolio(currency);
   const performanceQuery = usePortfolioPerformance(currency);
 
-  if (summaryQuery.isLoading || portfolioQuery.isLoading || performanceQuery.isLoading) {
+  if (portfolioQuery.isLoading || performanceQuery.isLoading) {
     return <Card>Loading dashboard...</Card>;
   }
 
-  if (summaryQuery.error || portfolioQuery.error || performanceQuery.error || !summaryQuery.data || !portfolioQuery.data || !performanceQuery.data) {
+  if (portfolioQuery.error || performanceQuery.error || !portfolioQuery.data || !performanceQuery.data) {
     return <Card>Unable to load dashboard data.</Card>;
   }
 
@@ -44,12 +43,12 @@ export function DashboardPage() {
           </div>
         </div>
       </Card>
-      <SummaryCards summary={summaryQuery.data} />
+      <SummaryCards summary={portfolioQuery.data.summary} />
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
         <Card>
           <div className="mb-4">
             <h2 className="text-xl font-semibold">Portfolio evolution</h2>
-            <p className="text-sm text-slate-400">Historical invested capital over time.</p>
+            <p className="text-sm text-slate-400">Estimated market value of your holdings over time.</p>
           </div>
           <PerformanceChart points={performanceQuery.data.data} currency={currency} />
         </Card>
@@ -63,7 +62,7 @@ export function DashboardPage() {
       </div>
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
         <TopMovers positions={portfolioQuery.data.positions} currency={currency} />
-        <IncomeCard summary={summaryQuery.data} />
+        <IncomeCard summary={portfolioQuery.data.summary} />
       </div>
     </div>
   );

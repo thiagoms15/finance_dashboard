@@ -34,7 +34,14 @@ cp .env.example .env
 2. Start the full stack:
 
 ```bash
-docker compose up --build -d
+docker compose up -d
+```
+
+If you changed dependencies or Dockerfiles, rebuild images first:
+
+```bash
+docker compose build
+docker compose up -d
 ```
 
 3. Open the app:
@@ -49,7 +56,7 @@ Grafana is included in `docker-compose.yml` and starts together with the rest of
 the stack when you run:
 
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
 
 To view the dashboard:

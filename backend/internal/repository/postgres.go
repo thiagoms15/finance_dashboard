@@ -487,6 +487,62 @@ func (s *PostgresStore) ListLatestPrices(ctx context.Context) ([]domain.AssetPri
 	return prices, rows.Err()
 }
 
+func (s *PostgresStore) ListLatestPricesByAssetIDs(ctx context.Context, assetIDs []uuid.UUID) ([]domain.AssetPrice, error) {
+	if len(assetIDs) == 0 {
+		return []domain.AssetPrice{}, nil
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT ON (asset_id)
+			id, asset_id, price, previous_close, currency, timestamp
+		FROM asset_prices
+		WHERE asset_id = ANY($1::uuid[])
+		ORDER BY asset_id, timestamp DESC
+	`, assetIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var prices []domain.AssetPrice
+	for rows.Next() {
+		price, err := scanAssetPrice(rows)
+		if err != nil {
+			return nil, err
+		}
+		prices = append(prices, price)
+	}
+	return prices, rows.Err()
+}
+
+func (s *PostgresStore) ListPriceHistoryByAssetIDs(ctx context.Context, assetIDs []uuid.UUID, since time.Time) ([]domain.AssetPrice, error) {
+	if len(assetIDs) == 0 {
+		return []domain.AssetPrice{}, nil
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT id, asset_id, price, previous_close, currency, timestamp
+		FROM asset_prices
+		WHERE asset_id = ANY($1::uuid[])
+		  AND timestamp >= $2
+		ORDER BY asset_id ASC, timestamp ASC
+	`, assetIDs, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	prices := make([]domain.AssetPrice, 0, len(assetIDs)*32)
+	for rows.Next() {
+		price, err := scanAssetPrice(rows)
+		if err != nil {
+			return nil, err
+		}
+		prices = append(prices, price)
+	}
+	return prices, rows.Err()
+}
+
 func (s *PostgresStore) UpsertAssetPrice(ctx context.Context, price domain.AssetPrice) error {
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO asset_prices (asset_id, price, previous_close, currency, timestamp)
@@ -524,6 +580,33 @@ func (s *PostgresStore) UpsertExchangeRate(ctx context.Context, rate domain.Exch
 		VALUES ($1, $2, $3, $4)
 	`, strings.ToUpper(rate.Base), strings.ToUpper(rate.Quote), rate.Rate.String(), rate.Timestamp)
 	return err
+}
+
+func (s *PostgresStore) ListAssetsByIDs(ctx context.Context, assetIDs []uuid.UUID) ([]domain.Asset, error) {
+	if len(assetIDs) == 0 {
+		return []domain.Asset{}, nil
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT id, symbol, name, exchange, currency, sector, created_at, updated_at
+		FROM assets
+		WHERE id = ANY($1::uuid[])
+		ORDER BY symbol ASC
+	`, assetIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	assets := make([]domain.Asset, 0, len(assetIDs))
+	for rows.Next() {
+		asset, err := scanAsset(rows)
+		if err != nil {
+			return nil, err
+		}
+		assets = append(assets, asset)
+	}
+	return assets, rows.Err()
 }
 
 func scanUser(row interface{ Scan(dest ...any) error }) (domain.User, error) {

@@ -37,7 +37,7 @@ export function ReportsPage() {
         {latestPoint ? (
           <div className="mt-4 space-y-3 text-sm text-slate-300">
             <p>Date: {formatDate(latestPoint.date)}</p>
-            <p>Invested capital: {formatCurrency(latestPoint.value, currency)}</p>
+            <p>Estimated portfolio value: {formatCurrency(latestPoint.value, currency)}</p>
           </div>
         ) : (
           <p className="mt-4 text-sm text-slate-400">No performance points yet.</p>

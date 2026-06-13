@@ -15,10 +15,16 @@ export function PerformanceChart({
     return <EmptyState title="No performance data" description="Create trades to visualize portfolio evolution." />;
   }
 
-  const data = points.map((point) => ({
-    date: formatDate(point.date),
-    value: Number(point.value)
-  }));
+  const groupedByDay = new Map<string, { date: string; value: number }>();
+  for (const point of points) {
+    const day = formatDate(point.date);
+    // Keep the latest point of the day so intraday updates are represented.
+    groupedByDay.set(day, {
+      date: day,
+      value: Number(point.value)
+    });
+  }
+  const data = Array.from(groupedByDay.values());
 
   return (
     <div className="h-80">

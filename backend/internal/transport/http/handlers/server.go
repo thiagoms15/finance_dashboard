@@ -388,12 +388,12 @@ func (s *Server) portfolio(c *gin.Context) {
 
 func (s *Server) portfolioSummary(c *gin.Context) {
 	preferred := strings.ToUpper(c.DefaultQuery("currency", "USD"))
-	snapshot, err := s.service.PortfolioSnapshot(c.Request.Context(), middleware.UserID(c), preferred)
+	summary, err := s.service.PortfolioSummary(c.Request.Context(), middleware.UserID(c), preferred)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, snapshot.Summary)
+	c.JSON(http.StatusOK, summary)
 }
 
 func (s *Server) portfolioPerformance(c *gin.Context) {

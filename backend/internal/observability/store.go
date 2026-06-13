@@ -33,9 +33,12 @@ type DBStore interface {
 	UpdateDividend(ctx context.Context, dividend domain.Dividend) (domain.Dividend, error)
 	DeleteDividend(ctx context.Context, userID, dividendID uuid.UUID) error
 	ListLatestPrices(ctx context.Context) ([]domain.AssetPrice, error)
+	ListLatestPricesByAssetIDs(ctx context.Context, assetIDs []uuid.UUID) ([]domain.AssetPrice, error)
+	ListPriceHistoryByAssetIDs(ctx context.Context, assetIDs []uuid.UUID, since time.Time) ([]domain.AssetPrice, error)
 	UpsertAssetPrice(ctx context.Context, price domain.AssetPrice) error
 	GetLatestExchangeRates(ctx context.Context) ([]domain.ExchangeRate, error)
 	UpsertExchangeRate(ctx context.Context, rate domain.ExchangeRate) error
+	ListAssetsByIDs(ctx context.Context, assetIDs []uuid.UUID) ([]domain.Asset, error)
 }
 
 type InstrumentedStore struct {
@@ -207,6 +210,20 @@ func (s *InstrumentedStore) ListLatestPrices(ctx context.Context) ([]domain.Asse
 	return items, err
 }
 
+func (s *InstrumentedStore) ListLatestPricesByAssetIDs(ctx context.Context, assetIDs []uuid.UUID) ([]domain.AssetPrice, error) {
+	startedAt := time.Now()
+	items, err := s.next.ListLatestPricesByAssetIDs(ctx, assetIDs)
+	ObserveDBQuery("list_latest_prices_by_asset_ids", startedAt, err)
+	return items, err
+}
+
+func (s *InstrumentedStore) ListPriceHistoryByAssetIDs(ctx context.Context, assetIDs []uuid.UUID, since time.Time) ([]domain.AssetPrice, error) {
+	startedAt := time.Now()
+	items, err := s.next.ListPriceHistoryByAssetIDs(ctx, assetIDs, since)
+	ObserveDBQuery("list_price_history_by_asset_ids", startedAt, err)
+	return items, err
+}
+
 func (s *InstrumentedStore) UpsertAssetPrice(ctx context.Context, price domain.AssetPrice) error {
 	startedAt := time.Now()
 	err := s.next.UpsertAssetPrice(ctx, price)
@@ -226,4 +243,11 @@ func (s *InstrumentedStore) UpsertExchangeRate(ctx context.Context, rate domain.
 	err := s.next.UpsertExchangeRate(ctx, rate)
 	ObserveDBQuery("upsert_exchange_rate", startedAt, err)
 	return err
+}
+
+func (s *InstrumentedStore) ListAssetsByIDs(ctx context.Context, assetIDs []uuid.UUID) ([]domain.Asset, error) {
+	startedAt := time.Now()
+	assets, err := s.next.ListAssetsByIDs(ctx, assetIDs)
+	ObserveDBQuery("list_assets_by_ids", startedAt, err)
+	return assets, err
 }

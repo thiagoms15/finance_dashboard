@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,17 +62,27 @@ type Store interface {
 	UpdateDividend(ctx context.Context, dividend domain.Dividend) (domain.Dividend, error)
 	DeleteDividend(ctx context.Context, userID, dividendID uuid.UUID) error
 	ListLatestPrices(ctx context.Context) ([]domain.AssetPrice, error)
+	ListLatestPricesByAssetIDs(ctx context.Context, assetIDs []uuid.UUID) ([]domain.AssetPrice, error)
+	ListPriceHistoryByAssetIDs(ctx context.Context, assetIDs []uuid.UUID, since time.Time) ([]domain.AssetPrice, error)
 	UpsertAssetPrice(ctx context.Context, price domain.AssetPrice) error
 	GetLatestExchangeRates(ctx context.Context) ([]domain.ExchangeRate, error)
 	UpsertExchangeRate(ctx context.Context, rate domain.ExchangeRate) error
+	ListAssetsByIDs(ctx context.Context, assetIDs []uuid.UUID) ([]domain.Asset, error)
 }
 
 type AppService struct {
-	store        Store
-	tokenManager *auth.TokenManager
-	hasher       auth.PasswordHasher
-	accessTTL    time.Duration
-	refreshTTL   time.Duration
+	store         Store
+	tokenManager  *auth.TokenManager
+	hasher        auth.PasswordHasher
+	accessTTL     time.Duration
+	refreshTTL    time.Duration
+	cacheMu       sync.RWMutex
+	snapshotCache map[string]cachedSnapshot
+}
+
+type cachedSnapshot struct {
+	value     portfolio.Snapshot
+	expiresAt time.Time
 }
 
 type RegisterInput struct {
@@ -117,11 +128,12 @@ type AssetInput struct {
 
 func New(store Store, tokenManager *auth.TokenManager, hasher auth.PasswordHasher, accessTTL, refreshTTL time.Duration) *AppService {
 	return &AppService{
-		store:        store,
-		tokenManager: tokenManager,
-		hasher:       hasher,
-		accessTTL:    accessTTL,
-		refreshTTL:   refreshTTL,
+		store:         store,
+		tokenManager:  tokenManager,
+		hasher:        hasher,
+		accessTTL:     accessTTL,
+		refreshTTL:    refreshTTL,
+		snapshotCache: make(map[string]cachedSnapshot),
 	}
 }
 
@@ -288,13 +300,17 @@ func (s *AppService) CreateAsset(ctx context.Context, input AssetInput) (domain.
 		name = symbol
 	}
 
-	return s.store.CreateAsset(ctx, domain.Asset{
+	asset, err := s.store.CreateAsset(ctx, domain.Asset{
 		Symbol:   symbol,
 		Name:     name,
 		Exchange: exchange,
 		Currency: currency,
 		Sector:   sector,
 	})
+	if err == nil {
+		s.invalidatePortfolioCache()
+	}
+	return asset, err
 }
 
 func (s *AppService) CreateTransaction(ctx context.Context, userID uuid.UUID, input TransactionInput) (domain.Transaction, error) {
@@ -306,7 +322,7 @@ func (s *AppService) CreateTransaction(ctx context.Context, userID uuid.UUID, in
 		return domain.Transaction{}, err
 	}
 
-	return s.store.CreateTransaction(ctx, domain.Transaction{
+	item, err := s.store.CreateTransaction(ctx, domain.Transaction{
 		UserID:          userID,
 		AssetID:         input.AssetID,
 		Type:            input.Type,
@@ -317,6 +333,10 @@ func (s *AppService) CreateTransaction(ctx context.Context, userID uuid.UUID, in
 		TransactionDate: input.TransactionDate.UTC(),
 		Notes:           strings.TrimSpace(input.Notes),
 	})
+	if err == nil {
+		s.invalidatePortfolioCache()
+	}
+	return item, err
 }
 
 func (s *AppService) UpdateTransaction(ctx context.Context, userID, transactionID uuid.UUID, input TransactionInput) (domain.Transaction, error) {
@@ -324,7 +344,7 @@ func (s *AppService) UpdateTransaction(ctx context.Context, userID, transactionI
 		return domain.Transaction{}, err
 	}
 
-	return s.store.UpdateTransaction(ctx, domain.Transaction{
+	item, err := s.store.UpdateTransaction(ctx, domain.Transaction{
 		ID:              transactionID,
 		UserID:          userID,
 		AssetID:         input.AssetID,
@@ -336,10 +356,18 @@ func (s *AppService) UpdateTransaction(ctx context.Context, userID, transactionI
 		TransactionDate: input.TransactionDate.UTC(),
 		Notes:           strings.TrimSpace(input.Notes),
 	})
+	if err == nil {
+		s.invalidatePortfolioCache()
+	}
+	return item, err
 }
 
 func (s *AppService) DeleteTransaction(ctx context.Context, userID, transactionID uuid.UUID) error {
-	return s.store.DeleteTransaction(ctx, userID, transactionID)
+	if err := s.store.DeleteTransaction(ctx, userID, transactionID); err != nil {
+		return err
+	}
+	s.invalidatePortfolioCache()
+	return nil
 }
 
 func (s *AppService) ListTransactions(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Transaction, error) {
@@ -354,13 +382,17 @@ func (s *AppService) CreateDividend(ctx context.Context, userID uuid.UUID, input
 		return domain.Dividend{}, err
 	}
 
-	return s.store.CreateDividend(ctx, domain.Dividend{
+	item, err := s.store.CreateDividend(ctx, domain.Dividend{
 		UserID:      userID,
 		AssetID:     input.AssetID,
 		Amount:      input.Amount,
 		Currency:    strings.ToUpper(input.Currency),
 		PaymentDate: input.PaymentDate.UTC(),
 	})
+	if err == nil {
+		s.invalidatePortfolioCache()
+	}
+	return item, err
 }
 
 func (s *AppService) UpdateDividend(ctx context.Context, userID, dividendID uuid.UUID, input DividendInput) (domain.Dividend, error) {
@@ -368,7 +400,7 @@ func (s *AppService) UpdateDividend(ctx context.Context, userID, dividendID uuid
 		return domain.Dividend{}, ErrInvalidInput
 	}
 
-	return s.store.UpdateDividend(ctx, domain.Dividend{
+	item, err := s.store.UpdateDividend(ctx, domain.Dividend{
 		ID:          dividendID,
 		UserID:      userID,
 		AssetID:     input.AssetID,
@@ -376,10 +408,18 @@ func (s *AppService) UpdateDividend(ctx context.Context, userID, dividendID uuid
 		Currency:    strings.ToUpper(input.Currency),
 		PaymentDate: input.PaymentDate.UTC(),
 	})
+	if err == nil {
+		s.invalidatePortfolioCache()
+	}
+	return item, err
 }
 
 func (s *AppService) DeleteDividend(ctx context.Context, userID, dividendID uuid.UUID) error {
-	return s.store.DeleteDividend(ctx, userID, dividendID)
+	if err := s.store.DeleteDividend(ctx, userID, dividendID); err != nil {
+		return err
+	}
+	s.invalidatePortfolioCache()
+	return nil
 }
 
 func (s *AppService) ListDividends(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Dividend, error) {
@@ -387,6 +427,11 @@ func (s *AppService) ListDividends(ctx context.Context, userID uuid.UUID, limit 
 }
 
 func (s *AppService) PortfolioSnapshot(ctx context.Context, userID uuid.UUID, preferredCurrency string) (portfolio.Snapshot, error) {
+	cacheKey := snapshotCacheKey(userID, preferredCurrency)
+	if cached, ok := s.getCachedSnapshot(cacheKey); ok {
+		return cached, nil
+	}
+
 	txns, err := s.store.ListTransactions(ctx, userID, 1000)
 	if err != nil {
 		return portfolio.Snapshot{}, err
@@ -395,12 +440,13 @@ func (s *AppService) PortfolioSnapshot(ctx context.Context, userID uuid.UUID, pr
 	if err != nil {
 		return portfolio.Snapshot{}, err
 	}
-	prices, err := s.store.ListLatestPrices(ctx)
+	assetIDs := uniqueAssetIDs(txns, dividends)
+	prices, err := s.store.ListLatestPricesByAssetIDs(ctx, assetIDs)
 	if err != nil {
 		return portfolio.Snapshot{}, err
 	}
 
-	assetsMap, err := s.assetsMap(ctx)
+	assetsMap, err := s.assetsMap(ctx, assetIDs)
 	if err != nil {
 		return portfolio.Snapshot{}, err
 	}
@@ -410,7 +456,20 @@ func (s *AppService) PortfolioSnapshot(ctx context.Context, userID uuid.UUID, pr
 		return portfolio.Snapshot{}, err
 	}
 
-	return portfolio.Calculate(assetsMap, txns, dividends, prices, strings.ToUpper(preferredCurrency), converter(rates, preferredCurrency))
+	snapshot, err := portfolio.Calculate(assetsMap, txns, dividends, prices, strings.ToUpper(preferredCurrency), converter(rates, preferredCurrency))
+	if err != nil {
+		return portfolio.Snapshot{}, err
+	}
+	s.storeSnapshot(cacheKey, snapshot)
+	return snapshot, nil
+}
+
+func (s *AppService) PortfolioSummary(ctx context.Context, userID uuid.UUID, preferredCurrency string) (portfolio.PortfolioSummary, error) {
+	snapshot, err := s.PortfolioSnapshot(ctx, userID, preferredCurrency)
+	if err != nil {
+		return portfolio.PortfolioSummary{}, err
+	}
+	return snapshot.Summary, nil
 }
 
 func (s *AppService) PortfolioPerformance(ctx context.Context, userID uuid.UUID, preferredCurrency string) ([]portfolio.PerformancePoint, error) {
@@ -418,6 +477,22 @@ func (s *AppService) PortfolioPerformance(ctx context.Context, userID uuid.UUID,
 	if err != nil {
 		return nil, err
 	}
+	if len(txns) == 0 {
+		return []portfolio.PerformancePoint{}, nil
+	}
+
+	assetIDs := uniqueAssetIDs(txns, nil)
+	earliest := txns[0].TransactionDate
+	for _, txn := range txns[1:] {
+		if txn.TransactionDate.Before(earliest) {
+			earliest = txn.TransactionDate
+		}
+	}
+	prices, err := s.store.ListPriceHistoryByAssetIDs(ctx, assetIDs, earliest.Add(-24*time.Hour))
+	if err != nil {
+		return nil, err
+	}
+
 	rates, err := s.exchangeRateMap(ctx)
 	if err != nil {
 		return nil, err
@@ -425,7 +500,7 @@ func (s *AppService) PortfolioPerformance(ctx context.Context, userID uuid.UUID,
 	sort.Slice(txns, func(i, j int) bool {
 		return txns[i].TransactionDate.Before(txns[j].TransactionDate)
 	})
-	return portfolio.BuildPerformanceSeries(txns, strings.ToUpper(preferredCurrency), converter(rates, preferredCurrency)), nil
+	return portfolio.BuildPerformanceSeries(txns, prices, strings.ToUpper(preferredCurrency), converter(rates, preferredCurrency)), nil
 }
 
 func (s *AppService) createLoginOutput(ctx context.Context, user domain.User) (LoginOutput, error) {
@@ -458,8 +533,8 @@ func (s *AppService) createAccessOutput(user domain.User, refreshToken string, r
 	}, nil
 }
 
-func (s *AppService) assetsMap(ctx context.Context) (map[uuid.UUID]domain.Asset, error) {
-	assets, err := s.store.ListAssets(ctx, "", 1000)
+func (s *AppService) assetsMap(ctx context.Context, assetIDs []uuid.UUID) (map[uuid.UUID]domain.Asset, error) {
+	assets, err := s.store.ListAssetsByIDs(ctx, assetIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -468,6 +543,29 @@ func (s *AppService) assetsMap(ctx context.Context) (map[uuid.UUID]domain.Asset,
 		out[asset.ID] = asset
 	}
 	return out, nil
+}
+
+func uniqueAssetIDs(txns []domain.Transaction, dividends []domain.Dividend) []uuid.UUID {
+	if len(txns) == 0 && len(dividends) == 0 {
+		return nil
+	}
+	seen := make(map[uuid.UUID]struct{}, len(txns)+len(dividends))
+	ids := make([]uuid.UUID, 0, len(txns)+len(dividends))
+	for _, txn := range txns {
+		if _, ok := seen[txn.AssetID]; ok {
+			continue
+		}
+		seen[txn.AssetID] = struct{}{}
+		ids = append(ids, txn.AssetID)
+	}
+	for _, dividend := range dividends {
+		if _, ok := seen[dividend.AssetID]; ok {
+			continue
+		}
+		seen[dividend.AssetID] = struct{}{}
+		ids = append(ids, dividend.AssetID)
+	}
+	return ids
 }
 
 func (s *AppService) exchangeRateMap(ctx context.Context) (map[string]decimal.Decimal, error) {
@@ -497,6 +595,36 @@ func converter(rates map[string]decimal.Decimal, preferredCurrency string) func(
 		}
 		return amount.Mul(rate)
 	}
+}
+
+func snapshotCacheKey(userID uuid.UUID, preferredCurrency string) string {
+	return userID.String() + ":" + strings.ToUpper(strings.TrimSpace(preferredCurrency))
+}
+
+func (s *AppService) getCachedSnapshot(key string) (portfolio.Snapshot, bool) {
+	now := time.Now().UTC()
+	s.cacheMu.RLock()
+	entry, ok := s.snapshotCache[key]
+	s.cacheMu.RUnlock()
+	if !ok || entry.expiresAt.Before(now) {
+		return portfolio.Snapshot{}, false
+	}
+	return entry.value, true
+}
+
+func (s *AppService) storeSnapshot(key string, snapshot portfolio.Snapshot) {
+	s.cacheMu.Lock()
+	s.snapshotCache[key] = cachedSnapshot{
+		value:     snapshot,
+		expiresAt: time.Now().UTC().Add(2 * time.Second),
+	}
+	s.cacheMu.Unlock()
+}
+
+func (s *AppService) invalidatePortfolioCache() {
+	s.cacheMu.Lock()
+	s.snapshotCache = make(map[string]cachedSnapshot)
+	s.cacheMu.Unlock()
 }
 
 func validateTransactionInput(input TransactionInput) error {
