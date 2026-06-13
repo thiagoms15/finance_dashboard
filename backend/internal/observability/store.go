@@ -25,6 +25,7 @@ type DBStore interface {
 	GetAssetByID(ctx context.Context, id uuid.UUID) (domain.Asset, error)
 	CreateAsset(ctx context.Context, asset domain.Asset) (domain.Asset, error)
 	ListTransactions(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Transaction, error)
+	ListTransactionsByAssetID(ctx context.Context, userID, assetID uuid.UUID, limit int) ([]domain.Transaction, error)
 	CreateTransaction(ctx context.Context, txn domain.Transaction) (domain.Transaction, error)
 	UpdateTransaction(ctx context.Context, txn domain.Transaction) (domain.Transaction, error)
 	DeleteTransaction(ctx context.Context, userID, transactionID uuid.UUID) error
@@ -151,6 +152,13 @@ func (s *InstrumentedStore) ListTransactions(ctx context.Context, userID uuid.UU
 	startedAt := time.Now()
 	items, err := s.next.ListTransactions(ctx, userID, limit)
 	ObserveDBQuery("list_transactions", startedAt, err)
+	return items, err
+}
+
+func (s *InstrumentedStore) ListTransactionsByAssetID(ctx context.Context, userID, assetID uuid.UUID, limit int) ([]domain.Transaction, error) {
+	startedAt := time.Now()
+	items, err := s.next.ListTransactionsByAssetID(ctx, userID, assetID, limit)
+	ObserveDBQuery("list_transactions_by_asset_id", startedAt, err)
 	return items, err
 }
 

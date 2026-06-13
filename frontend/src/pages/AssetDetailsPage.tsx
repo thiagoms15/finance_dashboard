@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { PerformanceChart } from "../components/charts/PerformanceChart";
-import { Card, EmptyState, SecondaryButton } from "../components/ui/primitives";
-import { useAssetIcon } from "../features/assets/hooks";
+import { Button, Card, EmptyState, SecondaryButton } from "../components/ui/primitives";
+import { useAssetIcon, useAssetPerformance } from "../features/assets/hooks";
 import { formatCurrency, formatDate, formatPercent } from "../lib/format";
 import { useSessionStore } from "../features/auth/store";
 import { usePortfolio, usePortfolioPerformance } from "../features/portfolio/hooks";
@@ -13,10 +13,12 @@ export function AssetDetailsPage() {
   const { assetId } = useParams();
   const currency = useSessionStore((state) => state.preferredCurrency);
   const portfolioQuery = usePortfolio(currency);
-  const performanceQuery = usePortfolioPerformance(currency);
+  const portfolioPerformanceQuery = usePortfolioPerformance(currency);
+  const assetPerformanceQuery = useAssetPerformance(assetId, currency);
   const transactionsQuery = useTransactions();
   const iconQuery = useAssetIcon(assetId);
   const [iconURL, setIconURL] = useState<string | null>(null);
+  const [performanceView, setPerformanceView] = useState<"portfolio" | "asset">("portfolio");
 
   const position = useMemo(
     () => portfolioQuery.data?.positions.find((item) => item.asset.id === assetId),
@@ -48,7 +50,9 @@ export function AssetDetailsPage() {
     };
   }, [iconQuery.data]);
 
-  if (portfolioQuery.isLoading || performanceQuery.isLoading || transactionsQuery.isLoading) {
+  const performanceQuery = performanceView === "portfolio" ? portfolioPerformanceQuery : assetPerformanceQuery;
+
+  if (portfolioQuery.isLoading || portfolioPerformanceQuery.isLoading || assetPerformanceQuery.isLoading || transactionsQuery.isLoading) {
     return <Card>Loading asset details...</Card>;
   }
 
@@ -104,8 +108,28 @@ export function AssetDetailsPage() {
       </Card>
 
       <Card>
-        <h3 className="text-xl font-semibold">Portfolio evolution context</h3>
-        <p className="mt-1 text-sm text-slate-400">The backend currently exposes portfolio-level performance, reused here for context.</p>
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h3 className="text-xl font-semibold">Portfolio evolution</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              {performanceView === "portfolio"
+                ? "Consolidated view across all your assets."
+                : `Historical value for ${position.asset.symbol} only.`}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {performanceView === "portfolio" ? (
+              <Button>Consolidated</Button>
+            ) : (
+              <SecondaryButton onClick={() => setPerformanceView("portfolio")}>Consolidated</SecondaryButton>
+            )}
+            {performanceView === "asset" ? (
+              <Button>{position.asset.symbol}</Button>
+            ) : (
+              <SecondaryButton onClick={() => setPerformanceView("asset")}>{position.asset.symbol}</SecondaryButton>
+            )}
+          </div>
+        </div>
         <div className="mt-4">
           <PerformanceChart points={performanceQuery.data?.data ?? []} currency={currency} />
         </div>

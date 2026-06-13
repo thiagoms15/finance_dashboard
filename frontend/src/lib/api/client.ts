@@ -128,6 +128,8 @@ export const api = {
     listResponse(await request<ApiListResponse<Asset>>(`/assets${search ? `?search=${encodeURIComponent(search)}` : ""}`)),
   createAsset: (body: CreateAssetRequest) => request<Asset>("/assets", { method: "POST", body }),
   asset: (id: string) => request<Asset>(`/assets/${id}`),
+  assetPerformance: async (id: string, currency: string) =>
+    listResponse(await request<ApiListResponse<PerformancePoint>>(`/assets/${id}/performance?currency=${currency}`)),
   assetIcon: async (id: string) => {
     let response = await executeRequest(`/assets/${id}/icon`);
 

@@ -15,21 +15,22 @@ import (
 )
 
 type mockStore struct {
-	createUserFn            func(ctx context.Context, name, email, passwordHash string) (domain.User, error)
-	getUserByEmailFn        func(ctx context.Context, email string) (domain.User, error)
-	createRefreshTokenFn    func(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) error
-	rotateRefreshTokenFn    func(ctx context.Context, tokenHash, newTokenHash string, expiresAt time.Time) (domain.User, error)
-	revokeRefreshTokenFn    func(ctx context.Context, tokenHash string) error
-	resetLoginFailuresFn    func(ctx context.Context, userID uuid.UUID) error
-	recordFailedLoginFn     func(ctx context.Context, userID uuid.UUID, now time.Time, window, lockDuration time.Duration) (*time.Time, error)
-	listTransactionsFn      func(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Transaction, error)
-	listDividendsFn         func(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Dividend, error)
-	listLatestPricesFn      func(ctx context.Context) ([]domain.AssetPrice, error)
-	listLatestPricesByIDsFn func(ctx context.Context, assetIDs []uuid.UUID) ([]domain.AssetPrice, error)
-	listPriceHistoryByIDsFn func(ctx context.Context, assetIDs []uuid.UUID, since time.Time) ([]domain.AssetPrice, error)
-	listAssetsFn            func(ctx context.Context, search string, limit int) ([]domain.Asset, error)
-	listAssetsByIDsFn       func(ctx context.Context, assetIDs []uuid.UUID) ([]domain.Asset, error)
-	getLatestRatesFn        func(ctx context.Context) ([]domain.ExchangeRate, error)
+	createUserFn              func(ctx context.Context, name, email, passwordHash string) (domain.User, error)
+	getUserByEmailFn          func(ctx context.Context, email string) (domain.User, error)
+	createRefreshTokenFn      func(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) error
+	rotateRefreshTokenFn      func(ctx context.Context, tokenHash, newTokenHash string, expiresAt time.Time) (domain.User, error)
+	revokeRefreshTokenFn      func(ctx context.Context, tokenHash string) error
+	resetLoginFailuresFn      func(ctx context.Context, userID uuid.UUID) error
+	recordFailedLoginFn       func(ctx context.Context, userID uuid.UUID, now time.Time, window, lockDuration time.Duration) (*time.Time, error)
+	listTransactionsFn        func(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Transaction, error)
+	listTransactionsByAssetFn func(ctx context.Context, userID, assetID uuid.UUID, limit int) ([]domain.Transaction, error)
+	listDividendsFn           func(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Dividend, error)
+	listLatestPricesFn        func(ctx context.Context) ([]domain.AssetPrice, error)
+	listLatestPricesByIDsFn   func(ctx context.Context, assetIDs []uuid.UUID) ([]domain.AssetPrice, error)
+	listPriceHistoryByIDsFn   func(ctx context.Context, assetIDs []uuid.UUID, since time.Time) ([]domain.AssetPrice, error)
+	listAssetsFn              func(ctx context.Context, search string, limit int) ([]domain.Asset, error)
+	listAssetsByIDsFn         func(ctx context.Context, assetIDs []uuid.UUID) ([]domain.Asset, error)
+	getLatestRatesFn          func(ctx context.Context) ([]domain.ExchangeRate, error)
 }
 
 func (m *mockStore) CreateUser(ctx context.Context, name, email, passwordHash string) (domain.User, error) {
@@ -101,6 +102,12 @@ func (m *mockStore) ListTransactions(ctx context.Context, userID uuid.UUID, limi
 		return m.listTransactionsFn(ctx, userID, limit)
 	}
 	return nil, nil
+}
+func (m *mockStore) ListTransactionsByAssetID(ctx context.Context, userID, assetID uuid.UUID, limit int) ([]domain.Transaction, error) {
+	if m.listTransactionsByAssetFn != nil {
+		return m.listTransactionsByAssetFn(ctx, userID, assetID, limit)
+	}
+	return m.ListTransactions(ctx, userID, limit)
 }
 func (m *mockStore) CreateTransaction(context.Context, domain.Transaction) (domain.Transaction, error) {
 	return domain.Transaction{}, nil

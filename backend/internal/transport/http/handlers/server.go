@@ -86,6 +86,7 @@ func NewRouter(cfg config.Config, service *service.AppService, tokens *auth.Toke
 		protected.POST("/assets", server.createAsset)
 		protected.GET("/assets/:id", server.getAsset)
 		protected.GET("/assets/:id/icon", server.getAssetIcon)
+		protected.GET("/assets/:id/performance", server.assetPerformance)
 		protected.GET("/transactions", server.listTransactions)
 		protected.POST("/transactions", server.createTransaction)
 		protected.PUT("/transactions/:id", server.updateTransaction)
@@ -260,6 +261,22 @@ func (s *Server) getAssetIcon(c *gin.Context) {
 
 	c.Header("Cache-Control", "private, max-age=3600")
 	c.Data(http.StatusOK, icon.ContentType, icon.Body)
+}
+
+func (s *Server) assetPerformance(c *gin.Context) {
+	assetID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		writeErrorMessage(c, http.StatusBadRequest, "invalid_id", "invalid asset id")
+		return
+	}
+
+	preferred := strings.ToUpper(c.DefaultQuery("currency", "USD"))
+	points, err := s.service.AssetPerformance(c.Request.Context(), middleware.UserID(c), assetID, preferred)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": points})
 }
 
 func (s *Server) listTransactions(c *gin.Context) {

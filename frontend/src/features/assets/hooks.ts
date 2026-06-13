@@ -29,3 +29,11 @@ export function useAssetIcon(assetId?: string) {
     enabled: Boolean(assetId)
   });
 }
+
+export function useAssetPerformance(assetId: string | undefined, currency: string) {
+  return useQuery({
+    queryKey: ["asset-performance", assetId, currency],
+    queryFn: () => api.assetPerformance(assetId ?? "", currency),
+    enabled: Boolean(assetId)
+  });
+}

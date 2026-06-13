@@ -54,6 +54,7 @@ type Store interface {
 	GetAssetByID(ctx context.Context, id uuid.UUID) (domain.Asset, error)
 	CreateAsset(ctx context.Context, asset domain.Asset) (domain.Asset, error)
 	ListTransactions(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Transaction, error)
+	ListTransactionsByAssetID(ctx context.Context, userID, assetID uuid.UUID, limit int) ([]domain.Transaction, error)
 	CreateTransaction(ctx context.Context, txn domain.Transaction) (domain.Transaction, error)
 	UpdateTransaction(ctx context.Context, txn domain.Transaction) (domain.Transaction, error)
 	DeleteTransaction(ctx context.Context, userID, transactionID uuid.UUID) error
@@ -500,6 +501,39 @@ func (s *AppService) PortfolioPerformance(ctx context.Context, userID uuid.UUID,
 	sort.Slice(txns, func(i, j int) bool {
 		return txns[i].TransactionDate.Before(txns[j].TransactionDate)
 	})
+	return portfolio.BuildPerformanceSeries(txns, prices, strings.ToUpper(preferredCurrency), converter(rates, preferredCurrency)), nil
+}
+
+func (s *AppService) AssetPerformance(ctx context.Context, userID, assetID uuid.UUID, preferredCurrency string) ([]portfolio.PerformancePoint, error) {
+	txns, err := s.store.ListTransactionsByAssetID(ctx, userID, assetID, 1000)
+	if err != nil {
+		return nil, err
+	}
+	if len(txns) == 0 {
+		return []portfolio.PerformancePoint{}, nil
+	}
+
+	earliest := txns[0].TransactionDate
+	for _, txn := range txns[1:] {
+		if txn.TransactionDate.Before(earliest) {
+			earliest = txn.TransactionDate
+		}
+	}
+
+	prices, err := s.store.ListPriceHistoryByAssetIDs(ctx, []uuid.UUID{assetID}, earliest.Add(-24*time.Hour))
+	if err != nil {
+		return nil, err
+	}
+
+	rates, err := s.exchangeRateMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(txns, func(i, j int) bool {
+		return txns[i].TransactionDate.Before(txns[j].TransactionDate)
+	})
+
 	return portfolio.BuildPerformanceSeries(txns, prices, strings.ToUpper(preferredCurrency), converter(rates, preferredCurrency)), nil
 }
 

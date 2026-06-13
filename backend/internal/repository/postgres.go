@@ -366,6 +366,34 @@ func (s *PostgresStore) ListTransactions(ctx context.Context, userID uuid.UUID, 
 	return txns, rows.Err()
 }
 
+func (s *PostgresStore) ListTransactionsByAssetID(ctx context.Context, userID, assetID uuid.UUID, limit int) ([]domain.Transaction, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT id, user_id, asset_id, type, quantity, price, fees, currency, transaction_date, notes, created_at, updated_at
+		FROM transactions
+		WHERE user_id = $1 AND asset_id = $2
+		ORDER BY transaction_date DESC, created_at DESC
+		LIMIT $3
+	`, userID, assetID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var txns []domain.Transaction
+	for rows.Next() {
+		txn, err := scanTransaction(rows)
+		if err != nil {
+			return nil, err
+		}
+		txns = append(txns, txn)
+	}
+	return txns, rows.Err()
+}
+
 func (s *PostgresStore) CreateTransaction(ctx context.Context, txn domain.Transaction) (domain.Transaction, error) {
 	row := s.db.QueryRow(ctx, `
 		INSERT INTO transactions (user_id, asset_id, type, quantity, price, fees, currency, transaction_date, notes)
