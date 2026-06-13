@@ -81,7 +81,7 @@ export function AssetDetailsPage() {
             </p>
           </div>
         </div>
-        <div className="mt-5 grid gap-4 md:grid-cols-3">
+        <div className="mt-5 grid gap-4 md:grid-cols-4">
           <div>
             <p className="text-sm text-slate-400">Open quantity</p>
             <p className="mt-2 text-xl font-semibold">{position.quantity}</p>
@@ -89,6 +89,10 @@ export function AssetDetailsPage() {
           <div>
             <p className="text-sm text-slate-400">Average cost</p>
             <p className="mt-2 text-xl font-semibold">{formatCurrency(position.averageCost, currency)}</p>
+          </div>
+          <div>
+            <p className="text-sm text-slate-400">Current price</p>
+            <p className="mt-2 text-xl font-semibold">{formatCurrency(position.currentPrice, position.currentCurrency || currency)}</p>
           </div>
           <div>
             <p className="text-sm text-slate-400">Unrealized P/L</p>
