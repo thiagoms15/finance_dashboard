@@ -40,6 +40,35 @@ docker compose up --build -d
 3. Open the app:
 
 - Frontend: [http://localhost:8081](http://localhost:8081)
+- Prometheus: [http://localhost:9090](http://localhost:9090)
+- Grafana: [http://localhost:3000](http://localhost:3000) (`admin` / `admin`)
+
+### Grafana Dashboard
+
+Grafana is included in `docker-compose.yml` and starts together with the rest of
+the stack when you run:
+
+```bash
+docker compose up --build -d
+```
+
+To view the dashboard:
+
+1. Open [http://localhost:3000](http://localhost:3000)
+2. Sign in with:
+   - user: `admin`
+   - password: `admin`
+3. Open the provisioned dashboard:
+   - `Dashboards`
+   - `Finance`
+   - `Finance Observability`
+
+The default dashboard includes:
+
+- API latency
+- Failed logins
+- Market-data refresh runs
+- Database query latency
 
 4. Stop the stack:
 
@@ -113,6 +142,7 @@ npm run build
 - Asset detail icons with backend-proxied provider images and safe fallbacks
 - Dashboard charts and reports
 - Dockerized frontend, backend, worker, Postgres, and Redis
+- Prometheus + Grafana observability stack with a provisioned Finance dashboard
 - CSP and security headers on the frontend nginx layer
 - Frontend access-token persistence with automatic refresh via secure HttpOnly cookie
 

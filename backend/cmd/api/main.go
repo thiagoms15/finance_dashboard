@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/thiago/finance/backend/internal/auth"
 	"github.com/thiago/finance/backend/internal/config"
+	"github.com/thiago/finance/backend/internal/observability"
 	"github.com/thiago/finance/backend/internal/repository"
 	"github.com/thiago/finance/backend/internal/service"
 	httpHandlers "github.com/thiago/finance/backend/internal/transport/http/handlers"
@@ -22,7 +22,7 @@ func main() {
 		panic(err)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
+	logger := observability.NewLogger("api")
 	ctx := context.Background()
 
 	store, err := repository.NewPostgresStore(ctx, cfg.DatabaseURL)
@@ -31,6 +31,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+	instrumentedStore := observability.NewInstrumentedStore(store)
 
 	tokenManager := auth.NewTokenManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAudience)
 	hasher := auth.PasswordHasher{
@@ -39,8 +40,8 @@ func main() {
 		Threads: cfg.Argon2Threads,
 		KeyLen:  cfg.Argon2KeyLen,
 	}
-	svc := service.New(store, tokenManager, hasher, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
-	router := httpHandlers.NewRouter(cfg, svc, tokenManager)
+	svc := service.New(instrumentedStore, tokenManager, hasher, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
+	router := httpHandlers.NewRouter(cfg, svc, tokenManager, logger)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

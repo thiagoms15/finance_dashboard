@@ -14,6 +14,7 @@ import (
 	"github.com/thiago/finance/backend/internal/auth"
 	"github.com/thiago/finance/backend/internal/domain"
 	"github.com/thiago/finance/backend/internal/domain/portfolio"
+	"github.com/thiago/finance/backend/internal/observability"
 	"github.com/thiago/finance/backend/internal/repository"
 )
 
@@ -80,12 +81,12 @@ type RegisterInput struct {
 }
 
 type LoginOutput struct {
-	AccessToken       string      `json:"accessToken"`
-	TokenType         string      `json:"tokenType"`
-	ExpiresIn         int64       `json:"expiresIn"`
-	User              domain.User `json:"user"`
-	RefreshToken      string      `json:"-"`
-	RefreshExpiresAt  time.Time   `json:"-"`
+	AccessToken      string      `json:"accessToken"`
+	TokenType        string      `json:"tokenType"`
+	ExpiresIn        int64       `json:"expiresIn"`
+	User             domain.User `json:"user"`
+	RefreshToken     string      `json:"-"`
+	RefreshExpiresAt time.Time   `json:"-"`
 }
 
 type TransactionInput struct {
@@ -149,12 +150,14 @@ func (s *AppService) Login(ctx context.Context, email, password string) (LoginOu
 	user, err := s.store.GetUserByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
+			observability.RecordFailedLogin("user_not_found")
 			return LoginOutput{}, ErrInvalidCredentials
 		}
 		return LoginOutput{}, err
 	}
 
 	if user.LockedUntil != nil && user.LockedUntil.After(time.Now().UTC()) {
+		observability.RecordFailedLogin("account_locked")
 		return LoginOutput{}, AccountLockedError{LockedUntil: *user.LockedUntil}
 	}
 
@@ -168,8 +171,10 @@ func (s *AppService) Login(ctx context.Context, email, password string) (LoginOu
 			return LoginOutput{}, err
 		}
 		if lockedUntil != nil {
+			observability.RecordFailedLogin("account_locked")
 			return LoginOutput{}, AccountLockedError{LockedUntil: *lockedUntil}
 		}
+		observability.RecordFailedLogin("invalid_credentials")
 		return LoginOutput{}, ErrInvalidCredentials
 	}
 

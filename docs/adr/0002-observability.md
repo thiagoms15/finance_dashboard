@@ -1,6 +1,6 @@
 # ADR 0002 — Observability: structured logging and metrics
 
-- **Status:** Accepted (partially implemented — see §Implementation status)
+- **Status:** Accepted and implemented
 - **Date:** 2026-06-13
 - **Deciders:** Engineering / Platform
 - **Related:** [`docs/architecture.md`](../architecture.md) §12, workspace rule
@@ -69,11 +69,11 @@ commit to tracking.
 | Structured logging via `slog` | ✅ Implemented | Backend + worker use `log/slog`; worker logs synced asset/rate counts |
 | `request_id` correlation | ✅ Implemented | `middleware.RequestID()` sets/propagates and echoes `X-Request-ID` |
 | Health endpoint | ✅ Implemented | `GET /healthz`; Postgres/Redis container healthchecks |
-| JSON log handler everywhere | ⛏️ Partial | Ensure all entrypoints use the JSON `slog` handler (not text) and consistent field names |
-| `user_id` + `action` on domain events | ⛏️ Planned | Add structured fields to mutations (CREATE/UPDATE/DELETE transaction, dividend, login) |
-| `/metrics` endpoint + Prometheus | ⛏️ Planned | No metrics exporter wired yet |
-| Grafana dashboards | ⛏️ Planned | Add to compose; provision dashboards for the four tracked signals |
-| API latency / DB query / failed-login / refresh metrics | ⛏️ Planned | Instrument middleware, repository, auth and worker |
+| JSON log handler everywhere | ✅ Implemented | API and worker use a shared JSON `slog` logger with a stable `service` field |
+| `user_id` + `action` on domain events | ✅ Implemented | Auth, asset, transaction and dividend mutations emit structured action logs with `request_id` and `user_id` where available |
+| `/metrics` endpoint + Prometheus | ✅ Implemented | API exposes `/metrics`; worker exposes a dedicated metrics server; Prometheus is wired in Compose |
+| Grafana dashboards | ✅ Implemented | Grafana is provisioned in Compose with a default Finance observability dashboard |
+| API latency / DB query / failed-login / refresh metrics | ✅ Implemented | Instrumented in HTTP middleware, store wrapper, auth flow and price-sync worker |
 
 ---
 
@@ -98,14 +98,9 @@ commit to tracking.
 
 ### Follow-ups
 
-1. Standardize a JSON `slog` handler and a small logging helper that always sets
-   `request_id` and accepts `user_id`/`action` fields.
-2. Add structured audit log lines on all user-owned mutations.
-3. Add a Prometheus-compatible `/metrics` endpoint and instrument: per-route
-   latency histogram, `auth_login_failures_total`, market-sync run metrics,
-   DB query latency.
-4. Add `prometheus` + `grafana` services to compose with provisioned dashboards.
-5. Confirm log retention/scrubbing against `14-logging-observability` and the
+1. Add alerting rules for auth abuse, stale market refreshes and elevated API / DB latency.
+2. Expand structured action logs to any future sensitive flows (imports, admin functions, exports).
+3. Confirm log retention/scrubbing against `14-logging-observability` and the
    data-classification rule.
 
 ---

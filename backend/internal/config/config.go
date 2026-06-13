@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Env                   string        `env:"ENV" envDefault:"development"`
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
+	MetricsAddr           string        `env:"METRICS_ADDR"`
 	DatabaseURL           string        `env:"DATABASE_URL,required"`
 	MigrationsDatabaseURL string        `env:"MIGRATIONS_DATABASE_URL"`
 	JWTSecret             string        `env:"JWT_SECRET,required"`

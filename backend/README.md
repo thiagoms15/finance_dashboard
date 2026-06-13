@@ -28,6 +28,7 @@ Important variables:
 - `REFRESH_COOKIE_DOMAIN`
 - `REFRESH_COOKIE_SAME_SITE`
 - `REFRESH_COOKIE_SECURE`
+- `METRICS_ADDR`
 - `CORS_ORIGINS`
 
 Do not commit `.env` or any real secrets.
@@ -52,6 +53,7 @@ Main routes:
 - `POST /api/auth/logout`
 - `POST /api/auth/password-reset/request`
 - `POST /api/auth/password-reset/confirm`
+- `GET /metrics`
 - `GET /api/assets`
 - `GET /api/assets/:id`
 - `GET /api/assets/:id/icon`
@@ -76,6 +78,10 @@ Main routes:
   the refresh token server-side.
 - Failed login attempts are tracked per account; 5 failures within 15 minutes
   lock the account for 15 minutes.
+- The API exposes Prometheus metrics on `GET /metrics`, and the worker can
+  expose its own metrics server via `METRICS_ADDR`.
+- Prometheus and Grafana are wired through Docker Compose with a provisioned
+  dashboard for API latency, failed logins, market refreshes, and DB timings.
 - Users now have a `name` field, returned in auth responses and used by the
   frontend welcome UI.
 - Live market data currently uses:

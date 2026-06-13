@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/thiago/finance/backend/internal/config"
 	"github.com/thiago/finance/backend/internal/domain"
 	"github.com/thiago/finance/backend/internal/marketdata"
+	"github.com/thiago/finance/backend/internal/observability"
 	"github.com/thiago/finance/backend/internal/repository"
 	"github.com/thiago/finance/backend/internal/service"
 	"github.com/thiago/finance/backend/internal/transport/http/dto"
@@ -28,9 +30,10 @@ type Server struct {
 	service      *service.AppService
 	tokens       *auth.TokenManager
 	iconResolver *marketdata.IconResolver
+	logger       *slog.Logger
 }
 
-func NewRouter(cfg config.Config, service *service.AppService, tokens *auth.TokenManager) *gin.Engine {
+func NewRouter(cfg config.Config, service *service.AppService, tokens *auth.TokenManager, logger *slog.Logger) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	if cfg.Env == "development" {
 		gin.SetMode(gin.DebugMode)
@@ -41,10 +44,12 @@ func NewRouter(cfg config.Config, service *service.AppService, tokens *auth.Toke
 		service:      service,
 		tokens:       tokens,
 		iconResolver: marketdata.NewIconResolver(cfg),
+		logger:       logger,
 	}
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(middleware.RequestID())
+	router.Use(observability.HTTPMiddleware(logger))
 	router.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.AllowedOrigins(),
 		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-ID"},
@@ -57,6 +62,7 @@ func NewRouter(cfg config.Config, service *service.AppService, tokens *auth.Toke
 	router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	router.GET("/metrics", gin.WrapH(observability.MetricsHandler()))
 	if cfg.Env != "production" {
 		router.StaticFile("/docs/openapi.yaml", "api/openapi.yaml")
 	}
@@ -108,9 +114,11 @@ func (s *Server) register(c *gin.Context) {
 		Password: req.Password,
 	})
 	if err != nil {
+		s.logAuthFailure(c, "REGISTER", err)
 		writeError(c, err)
 		return
 	}
+	s.logAction(c, "REGISTER")
 	s.writeAuthResponse(c, http.StatusCreated, output)
 }
 
@@ -121,9 +129,11 @@ func (s *Server) login(c *gin.Context) {
 	}
 	output, err := s.service.Login(c.Request.Context(), req.Email, req.Password)
 	if err != nil {
+		s.logAuthFailure(c, "LOGIN", err)
 		writeError(c, err)
 		return
 	}
+	s.logAction(c, "LOGIN", "user_id", output.User.ID.String())
 	s.writeAuthResponse(c, http.StatusOK, output)
 }
 
@@ -133,6 +143,7 @@ func (s *Server) logout(c *gin.Context) {
 		return
 	}
 	s.clearRefreshCookie(c)
+	s.logAction(c, "LOGOUT")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -142,6 +153,7 @@ func (s *Server) refresh(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
+	s.logAction(c, "REFRESH_SESSION", "user_id", output.User.ID.String())
 	s.writeAuthResponse(c, http.StatusOK, output)
 }
 
@@ -220,6 +232,7 @@ func (s *Server) createAsset(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, asset)
+	s.logAction(c, "CREATE_ASSET", "asset_id", asset.ID.String())
 }
 
 func (s *Server) getAssetIcon(c *gin.Context) {
@@ -270,6 +283,7 @@ func (s *Server) createTransaction(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, item)
+	s.logAction(c, "CREATE_TRANSACTION", "transaction_id", item.ID.String(), "asset_id", item.AssetID.String())
 }
 
 func (s *Server) updateTransaction(c *gin.Context) {
@@ -288,6 +302,7 @@ func (s *Server) updateTransaction(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, item)
+	s.logAction(c, "UPDATE_TRANSACTION", "transaction_id", item.ID.String(), "asset_id", item.AssetID.String())
 }
 
 func (s *Server) deleteTransaction(c *gin.Context) {
@@ -300,6 +315,7 @@ func (s *Server) deleteTransaction(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
+	s.logAction(c, "DELETE_TRANSACTION", "transaction_id", transactionID.String())
 	c.Status(http.StatusNoContent)
 }
 
@@ -324,6 +340,7 @@ func (s *Server) createDividend(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, item)
+	s.logAction(c, "CREATE_DIVIDEND", "dividend_id", item.ID.String(), "asset_id", item.AssetID.String())
 }
 
 func (s *Server) updateDividend(c *gin.Context) {
@@ -342,6 +359,7 @@ func (s *Server) updateDividend(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, item)
+	s.logAction(c, "UPDATE_DIVIDEND", "dividend_id", item.ID.String(), "asset_id", item.AssetID.String())
 }
 
 func (s *Server) deleteDividend(c *gin.Context) {
@@ -354,6 +372,7 @@ func (s *Server) deleteDividend(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
+	s.logAction(c, "DELETE_DIVIDEND", "dividend_id", dividendID.String())
 	c.Status(http.StatusNoContent)
 }
 
@@ -554,4 +573,22 @@ func cookieSameSite(mode string) http.SameSite {
 func isAccountLocked(err error) bool {
 	var lockedErr service.AccountLockedError
 	return errors.As(err, &lockedErr)
+}
+
+func (s *Server) logAction(c *gin.Context, action string, attrs ...any) {
+	allAttrs := append([]any{"action", action}, attrs...)
+	observability.RequestLogger(s.logger, c).Info("domain_action", allAttrs...)
+}
+
+func (s *Server) logAuthFailure(c *gin.Context, action string, err error) {
+	reason := "internal_error"
+	switch {
+	case errors.Is(err, service.ErrInvalidCredentials):
+		reason = "invalid_credentials"
+	case errors.Is(err, service.ErrInvalidInput):
+		reason = "invalid_input"
+	case isAccountLocked(err):
+		reason = "account_locked"
+	}
+	observability.RequestLogger(s.logger, c).Warn("auth_failed", "action", action, "reason", reason)
 }

@@ -65,16 +65,22 @@ flowchart LR
     wk[market-data-worker - Go]
     pg[(PostgreSQL 17)]
     rd[(Redis 8)]
+    pr[(Prometheus)]
+    gr[(Grafana)]
   end
   providers[/Public market data:\nBRAPI · Yahoo · CoinGecko · Frankfurter/]
 
   user -->|HTTPS| fe
+  user -->|Monitoring UI| gr
   fe -->|/api reverse proxy| be
   be --> pg
   be -. optional cache .-> rd
   wk --> pg
   wk -->|poll prices + FX| providers
   be -->|proxy asset icons| providers
+  pr -->|scrape /metrics| be
+  pr -->|scrape /metrics| wk
+  gr --> pr
 ```
 
 Only the **frontend** container publishes a host port. The backend, worker,
@@ -94,6 +100,8 @@ non-root images.
 | `frontend` | `./frontend` (nginx) | Serve built SPA, reverse-proxy `/api`, set CSP/security headers | `:${FRONTEND_PORT:-8081}` → `80` |
 | `backend` | `./backend` target `api` | REST API: auth, CRUD, portfolio calc, icon proxy | internal `:8080` |
 | `market-data-worker` | `./backend` target `worker` | Scheduled price + FX sync | internal |
+| `prometheus` | `prom/prometheus:v3.12.0` | Scrape and store API/worker metrics | `:${PROMETHEUS_PORT:-9090}` |
+| `grafana` | `grafana/grafana:13.0.2` | Visualize observability dashboards | `:${GRAFANA_PORT:-3000}` |
 | `migrate` | `./backend` target `migrate` | One-shot schema migration on boot | internal |
 | `postgres` | `postgres:17` | System of record (volume `postgres-data`) | internal `:5432` |
 | `redis` | `redis:8` | Optional latest-price/FX cache (volume `redis-data`) | internal `:6379` |
@@ -143,6 +151,9 @@ flowchart TD
   `sslmode=require|verify` outside development.
 - **`internal/transport/http`** — Gin router, handlers, DTOs and middleware.
   Handlers are thin: decode → call service → map errors to HTTP codes.
+- **`internal/observability`** — shared JSON logger, Prometheus collectors,
+  HTTP access-log middleware, request-scoped logger enrichment, and a store
+  wrapper that records DB operation timings.
 - **`internal/service`** — the application core. Owns validation, normalization
   (uppercase symbols/currencies, lowercase emails, trim names), orchestration,
   and the read-time assembly of a portfolio snapshot. Depends only on the
@@ -166,6 +177,16 @@ and the repository exposes `ErrNotFound`. The transport layer's `writeError`
 maps these to `400 / 401 / 404`, defaulting unknown errors to a generic `500`
 with no internal detail leaked to the client. Errors are returned as
 `{ "error": { "code", "message" } }`.
+
+### 5.3 Observability path
+
+- The API exposes `GET /metrics` on the same HTTP server as the REST API.
+- The worker exposes a dedicated metrics server on `METRICS_ADDR`.
+- Prometheus scrapes both processes and Grafana is provisioned with a default
+  dashboard covering API latency, failed logins, market refreshes and DB query
+  times.
+- Structured JSON action logs are emitted for auth, asset, transaction and
+  dividend mutations with `request_id` correlation and `user_id` where known.
 
 ---
 
@@ -407,7 +428,7 @@ and should not be changed without security sign-off.
 
 - Root [`.env`](../.env) / [`.env.example`](../.env.example) hold compose-level
   vars (`POSTGRES_*`, `JWT_*`, refresh-cookie settings, `CORS_ORIGINS`,
-  `FRONTEND_PORT`).
+  `FRONTEND_PORT`, monitoring ports and the worker metrics address).
 - Backend reads its config via env (see [`backend/.env.example`](../backend/.env.example));
   `godotenv` loads a local `.env` in development.
 - `ENV=development` relaxes the `sslmode` requirement, enables Gin debug mode,
@@ -420,7 +441,8 @@ and should not be changed without security sign-off.
 ## 11. Build, deploy and CI
 
 - **Local run** — `docker compose up --build`; `migrate` applies schema, then API
-  and worker start, then nginx serves the SPA on `${FRONTEND_PORT}`.
+  and worker start, Prometheus/Grafana come up, then nginx serves the SPA on
+  `${FRONTEND_PORT}`.
 - **Backend image** — single multi-stage Dockerfile, vendored modules
   (`go build -mod=vendor`) to avoid network flakiness during build, three
   distroless targets.
@@ -433,11 +455,19 @@ and should not be changed without security sign-off.
 
 ## 12. Observability
 
-- Structured `slog` logging in backend and worker; the price-sync job logs
-  counts of synced assets and rates.
+- Structured JSON `slog` logging in backend and worker with a stable `service`
+  field; request-scoped logs include `request_id`, and domain actions include
+  `action` plus `user_id` where available.
 - `X-Request-ID` middleware assigns/propagates an opaque correlation ID,
   surfaced back to the client via the `X-Request-ID` response header.
 - `GET /healthz` for liveness; Postgres/Redis use container healthchecks.
+- Prometheus metrics cover:
+  - API latency by method/route/status
+  - failed logins by reason
+  - market-data refresh counts/durations and assets/rates updated per run
+  - DB operation timings by repository operation
+- Grafana is provisioned locally with a default Finance dashboard backed by
+  Prometheus.
 
 ---
 
