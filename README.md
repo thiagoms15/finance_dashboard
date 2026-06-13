@@ -17,6 +17,8 @@ A full-stack portfolio tracker for B3, NASDAQ, and crypto assets.
 ## Security Notes
 
 - Copy `.env.example` to `.env` and replace the placeholder JWT secret before sharing or deploying.
+- Refresh-cookie behavior is configured on the backend via `REFRESH_COOKIE_*`
+  env vars; keep `REFRESH_COOKIE_SECURE=true` when deploying behind HTTPS.
 - Real secrets must stay in local `.env` files only. Do not commit them.
 - Frontend env vars must be `VITE_*` and non-secret only.
 - Provider API keys belong on the backend only.
@@ -101,7 +103,7 @@ npm run build
 
 ## What’s Implemented
 
-- Register, login, logout, and password reset flow
+- Register, login, refresh, logout, and password reset flow
 - User display names for a friendlier in-app welcome
 - Asset listing
 - Transaction CRUD
@@ -112,10 +114,11 @@ npm run build
 - Dashboard charts and reports
 - Dockerized frontend, backend, worker, Postgres, and Redis
 - CSP and security headers on the frontend nginx layer
-- Frontend session persistence with expiration across page reloads
+- Frontend access-token persistence with automatic refresh via secure HttpOnly cookie
 
 ## Current Limitations
 
 - Some asset icons still depend on third-party provider coverage, so uncommon symbols may fall back to initials.
 - U.S. equity market data and logos rely on public upstream endpoints, which are more fragile than dedicated commercial feeds.
 - The backend auth/crypto surface should still receive human security review before production use.
+- Docker Compose defaults `REFRESH_COOKIE_SECURE=false` for local HTTP development; switch it on under HTTPS deployments.

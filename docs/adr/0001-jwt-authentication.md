@@ -1,6 +1,6 @@
 # ADR 0001 — Authentication, authorization and secrets handling
 
-- **Status:** Accepted (partially implemented — see §Implementation status)
+- **Status:** Accepted and implemented (except Docker secrets future work)
 - **Date:** 2026-06-13
 - **Deciders:** Engineering / Security
 - **Related:** [`docs/architecture.md`](../architecture.md) §9, workspace rules
@@ -91,8 +91,8 @@ Tracked honestly so reviewers know what is real vs. planned:
 | Per-user query isolation | ✅ Implemented | service/repository pass `user_id` from the JWT on all user-owned reads/writes |
 | `.env` / `.env.example`, no secrets in code | ✅ Implemented | root + `backend/.env.example`, git-ignored real `.env` |
 | Auth rate limiting | ✅ Implemented | `RateLimit(5, 10s)` on `/api/auth/*` |
-| **Refresh tokens stored in DB** | ⛏️ Planned | `JWT_REFRESH_TTL` exists; no `refresh_tokens` table/rotation yet. Login currently returns only an access token |
-| **Account lockout** | ⛏️ Planned | Rate limiting exists; no per-account failure counter / lockout window yet |
+| **Refresh tokens stored in DB** | ✅ Implemented | `refresh_tokens` table, hashed token storage, rotation on `/api/auth/refresh`, revocation on logout |
+| **Account lockout** | ✅ Implemented | 5 failed logins in 15 minutes locks the account for 15 minutes |
 | **Docker secrets** | ⛏️ Future | Currently `.env`-based injection |
 
 ---
@@ -113,18 +113,16 @@ Tracked honestly so reviewers know what is real vs. planned:
 
 ### Negative / costs
 
-- Short access TTL requires a working refresh flow for good UX; until refresh
-  tokens land, clients re-login when the access token expires (mitigated today
-  by client-side session expiry tracking).
+- Short access TTL requires a working refresh flow for good UX; this is now
+  handled by DB-backed refresh tokens in a secure HttpOnly cookie.
 - DB-backed refresh tokens add storage, rotation and cleanup logic.
 - Account lockout must be tuned to avoid denial-of-service-by-lockout.
 
 ### Follow-ups
 
-1. Add a `refresh_tokens` table (hashed token, `user_id`, `expires_at`,
-   `revoked_at`) and a `/api/auth/refresh` + rotation-on-use flow.
-2. Add per-account failed-login counter with exponential backoff / temporary
-   lockout, logged for audit (no PII/secrets in logs).
+1. Add operational cleanup for expired/revoked refresh tokens.
+2. Add structured audit logging for lockouts, refresh rotation and logout
+   revocation (without logging tokens or secrets).
 3. Plan migration to Docker/orchestrator secrets for production.
 
 ---

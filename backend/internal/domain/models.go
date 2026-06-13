@@ -16,12 +16,15 @@ const (
 )
 
 type User struct {
-	ID           uuid.UUID `json:"id"`
-	Name         string    `json:"name"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID                  uuid.UUID  `json:"id"`
+	Name                string     `json:"name"`
+	Email               string     `json:"email"`
+	PasswordHash        string     `json:"-"`
+	FailedLoginAttempts int        `json:"-"`
+	FirstFailedLoginAt  *time.Time `json:"-"`
+	LockedUntil         *time.Time `json:"-"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	UpdatedAt           time.Time  `json:"updatedAt"`
 }
 
 type Asset struct {
@@ -85,4 +88,14 @@ type PasswordResetToken struct {
 	ExpiresAt time.Time  `json:"expiresAt"`
 	UsedAt    *time.Time `json:"usedAt,omitempty"`
 	CreatedAt time.Time  `json:"createdAt"`
+}
+
+type RefreshToken struct {
+	ID                  uuid.UUID  `json:"id"`
+	UserID              uuid.UUID  `json:"userId"`
+	TokenHash           string     `json:"-"`
+	ExpiresAt           time.Time  `json:"expiresAt"`
+	RevokedAt           *time.Time `json:"revokedAt,omitempty"`
+	ReplacedByTokenHash string     `json:"-"`
+	CreatedAt           time.Time  `json:"createdAt"`
 }

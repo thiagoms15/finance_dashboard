@@ -11,11 +11,17 @@ import (
 
 	"github.com/thiago/finance/backend/internal/auth"
 	"github.com/thiago/finance/backend/internal/domain"
+	"github.com/thiago/finance/backend/internal/repository"
 )
 
 type mockStore struct {
 	createUserFn           func(ctx context.Context, name, email, passwordHash string) (domain.User, error)
 	getUserByEmailFn       func(ctx context.Context, email string) (domain.User, error)
+	createRefreshTokenFn   func(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) error
+	rotateRefreshTokenFn   func(ctx context.Context, tokenHash, newTokenHash string, expiresAt time.Time) (domain.User, error)
+	revokeRefreshTokenFn   func(ctx context.Context, tokenHash string) error
+	resetLoginFailuresFn   func(ctx context.Context, userID uuid.UUID) error
+	recordFailedLoginFn    func(ctx context.Context, userID uuid.UUID, now time.Time, window, lockDuration time.Duration) (*time.Time, error)
 	listTransactionsFn     func(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Transaction, error)
 	listDividendsFn        func(ctx context.Context, userID uuid.UUID, limit int) ([]domain.Dividend, error)
 	listLatestPricesFn     func(ctx context.Context) ([]domain.AssetPrice, error)
@@ -44,6 +50,36 @@ func (m *mockStore) CreatePasswordResetToken(context.Context, uuid.UUID, string,
 }
 func (m *mockStore) ConsumePasswordResetToken(context.Context, string) (uuid.UUID, error) {
 	return uuid.Nil, nil
+}
+func (m *mockStore) CreateRefreshToken(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) error {
+	if m.createRefreshTokenFn != nil {
+		return m.createRefreshTokenFn(ctx, userID, tokenHash, expiresAt)
+	}
+	return nil
+}
+func (m *mockStore) RotateRefreshToken(ctx context.Context, tokenHash, newTokenHash string, expiresAt time.Time) (domain.User, error) {
+	if m.rotateRefreshTokenFn != nil {
+		return m.rotateRefreshTokenFn(ctx, tokenHash, newTokenHash, expiresAt)
+	}
+	return domain.User{}, repository.ErrNotFound
+}
+func (m *mockStore) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
+	if m.revokeRefreshTokenFn != nil {
+		return m.revokeRefreshTokenFn(ctx, tokenHash)
+	}
+	return nil
+}
+func (m *mockStore) ResetLoginFailures(ctx context.Context, userID uuid.UUID) error {
+	if m.resetLoginFailuresFn != nil {
+		return m.resetLoginFailuresFn(ctx, userID)
+	}
+	return nil
+}
+func (m *mockStore) RecordFailedLogin(ctx context.Context, userID uuid.UUID, now time.Time, window, lockDuration time.Duration) (*time.Time, error) {
+	if m.recordFailedLoginFn != nil {
+		return m.recordFailedLoginFn(ctx, userID, now, window, lockDuration)
+	}
+	return nil, nil
 }
 func (m *mockStore) ListAssets(ctx context.Context, search string, limit int) ([]domain.Asset, error) {
 	if m.listAssetsFn != nil {
@@ -173,6 +209,197 @@ func TestLoginRejectsInvalidPassword(t *testing.T) {
 	_, err = svc.Login(context.Background(), "user@example.com", "wrong-password")
 	if !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Login() error = %v, want %v", err, ErrInvalidCredentials)
+	}
+}
+
+func TestLoginCreatesRefreshTokenAndClearsFailures(t *testing.T) {
+	t.Parallel()
+
+	hasher := auth.PasswordHasher{Time: 1, Memory: 64 * 1024, Threads: 2, KeyLen: 32}
+	hash, err := hasher.Hash("correct-password")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+
+	userID := uuid.New()
+	var (
+		resetCalled      bool
+		refreshHash      string
+		refreshExpiresAt time.Time
+	)
+	store := &mockStore{
+		getUserByEmailFn: func(_ context.Context, email string) (domain.User, error) {
+			return domain.User{
+				ID:           userID,
+				Name:         "User",
+				Email:        email,
+				PasswordHash: hash,
+			}, nil
+		},
+		resetLoginFailuresFn: func(_ context.Context, gotUserID uuid.UUID) error {
+			resetCalled = gotUserID == userID
+			return nil
+		},
+		createRefreshTokenFn: func(_ context.Context, gotUserID uuid.UUID, tokenHash string, expiresAt time.Time) error {
+			if gotUserID != userID {
+				t.Fatalf("unexpected user id for refresh token: %v", gotUserID)
+			}
+			refreshHash = tokenHash
+			refreshExpiresAt = expiresAt
+			return nil
+		},
+	}
+	svc := New(store, auth.NewTokenManager("test-secret", "test-issuer", "test-aud"), hasher, 15*time.Minute, 7*24*time.Hour)
+
+	out, err := svc.Login(context.Background(), "user@example.com", "correct-password")
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	if !resetCalled {
+		t.Fatal("expected login failures to be reset")
+	}
+	if out.AccessToken == "" {
+		t.Fatal("access token should not be empty")
+	}
+	if out.RefreshToken == "" {
+		t.Fatal("refresh token should not be empty")
+	}
+	if refreshHash == "" {
+		t.Fatal("refresh token hash should be stored")
+	}
+	if refreshExpiresAt.IsZero() {
+		t.Fatal("refresh token expiry should be set")
+	}
+}
+
+func TestLoginLocksAccountAfterRepeatedFailures(t *testing.T) {
+	t.Parallel()
+
+	hasher := auth.PasswordHasher{Time: 1, Memory: 64 * 1024, Threads: 2, KeyLen: 32}
+	hash, err := hasher.Hash("correct-password")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+
+	userID := uuid.New()
+	lockUntil := time.Now().UTC().Add(15 * time.Minute)
+	store := &mockStore{
+		getUserByEmailFn: func(_ context.Context, email string) (domain.User, error) {
+			return domain.User{
+				ID:           userID,
+				Name:         "User",
+				Email:        email,
+				PasswordHash: hash,
+			}, nil
+		},
+		recordFailedLoginFn: func(_ context.Context, gotUserID uuid.UUID, _ time.Time, window, duration time.Duration) (*time.Time, error) {
+			if gotUserID != userID {
+				t.Fatalf("unexpected user id: %v", gotUserID)
+			}
+			if window != 15*time.Minute {
+				t.Fatalf("window = %v, want 15m", window)
+			}
+			if duration != 15*time.Minute {
+				t.Fatalf("duration = %v, want 15m", duration)
+			}
+			return &lockUntil, nil
+		},
+	}
+	svc := New(store, auth.NewTokenManager("test-secret", "test-issuer", "test-aud"), hasher, 15*time.Minute, 7*24*time.Hour)
+
+	_, err = svc.Login(context.Background(), "user@example.com", "wrong-password")
+	var lockedErr AccountLockedError
+	if !errors.As(err, &lockedErr) {
+		t.Fatalf("Login() error = %v, want AccountLockedError", err)
+	}
+	if !lockedErr.LockedUntil.Equal(lockUntil) {
+		t.Fatalf("lockout until = %v, want %v", lockedErr.LockedUntil, lockUntil)
+	}
+}
+
+func TestRefreshSessionRotatesRefreshToken(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	rawToken, tokenHash, err := auth.GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("GenerateRefreshToken() error = %v", err)
+	}
+
+	var gotNewHash string
+	store := &mockStore{
+		rotateRefreshTokenFn: func(_ context.Context, gotHash, newTokenHash string, expiresAt time.Time) (domain.User, error) {
+			if gotHash != tokenHash {
+				t.Fatalf("token hash = %q, want %q", gotHash, tokenHash)
+			}
+			if newTokenHash == "" || newTokenHash == tokenHash {
+				t.Fatalf("unexpected rotated token hash: %q", newTokenHash)
+			}
+			if expiresAt.IsZero() {
+				t.Fatal("rotated token expiry should not be zero")
+			}
+			gotNewHash = newTokenHash
+			return domain.User{
+				ID:    userID,
+				Name:  "User",
+				Email: "user@example.com",
+			}, nil
+		},
+	}
+	svc := newTestService(store)
+
+	out, err := svc.RefreshSession(context.Background(), rawToken)
+	if err != nil {
+		t.Fatalf("RefreshSession() error = %v", err)
+	}
+	if out.AccessToken == "" {
+		t.Fatal("access token should not be empty")
+	}
+	if out.RefreshToken == "" {
+		t.Fatal("refresh token should not be empty")
+	}
+	if gotNewHash == "" {
+		t.Fatal("refresh token rotation should store a new hash")
+	}
+}
+
+func TestRefreshSessionRejectsUnknownToken(t *testing.T) {
+	t.Parallel()
+
+	rawToken, _, err := auth.GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("GenerateRefreshToken() error = %v", err)
+	}
+
+	svc := newTestService(&mockStore{})
+	_, err = svc.RefreshSession(context.Background(), rawToken)
+	if !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("RefreshSession() error = %v, want %v", err, ErrInvalidSession)
+	}
+}
+
+func TestLogoutRevokesRefreshToken(t *testing.T) {
+	t.Parallel()
+
+	rawToken, tokenHash, err := auth.GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("GenerateRefreshToken() error = %v", err)
+	}
+
+	var revokedHash string
+	store := &mockStore{
+		revokeRefreshTokenFn: func(_ context.Context, gotTokenHash string) error {
+			revokedHash = gotTokenHash
+			return nil
+		},
+	}
+	svc := newTestService(store)
+
+	if err := svc.Logout(context.Background(), rawToken); err != nil {
+		t.Fatalf("Logout() error = %v", err)
+	}
+	if revokedHash != tokenHash {
+		t.Fatalf("revoked token hash = %q, want %q", revokedHash, tokenHash)
 	}
 }
 

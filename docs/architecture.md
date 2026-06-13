@@ -42,9 +42,10 @@ implementation deviates from the spec.
 3. **Original transaction values are immutable.** Currency conversion is applied
    at read time against the latest FX rate; the stored transaction keeps its
    original currency and amount (SPEC §8).
-4. **Secure by default.** Argon2id hashing, short-lived JWTs, strict CSP, CORS
-   allowlist, rate limiting, TLS-required DB outside dev, no third-party secrets
-   on the client. See [§9 Security](#9-security-architecture).
+4. **Secure by default.** Argon2id hashing, short-lived JWTs, DB-backed refresh
+   tokens in HttpOnly cookies, account lockout, strict CSP, CORS allowlist,
+   TLS-required DB outside dev, and no third-party secrets on the client. See
+   [§9 Security](#9-security-architecture).
 5. **External data is untrusted and isolated.** Third-party market-data and icon
    fetches happen only on the backend/worker; the browser never talks to a
    provider directly and never holds provider API keys.
@@ -151,7 +152,8 @@ flowchart TD
   I/O, fully unit-testable.
 - **`internal/repository`** — `PostgresStore`, the concrete `Store`
   implementation over `pgx`, using parameterized queries only.
-- **`internal/auth`** — Argon2id password hashing and JWT issuance/verification.
+- **`internal/auth`** — Argon2id password hashing, JWT issuance/verification and
+  opaque refresh-token helpers.
 - **`internal/marketdata`** — `Provider` (live price/FX) and `IconResolver`
   (icon proxy). The only place that talks to third parties.
 - **`internal/jobs`** — `PriceSyncJob`, the scheduled sync loop used by the
@@ -177,13 +179,15 @@ React 18 + TypeScript SPA built with Vite, served statically by nginx.
   Dashboard, Portfolio, Asset details, Transactions, Reports, Settings.
 - **Server state** — TanStack Query hooks under `features/*/hooks.ts`, all going
   through a single typed API client ([`lib/api/client.ts`](../frontend/src/lib/api/client.ts)).
-  The client injects the bearer token, normalizes list responses (`data: null →
-  []`), and clears the session on `401`.
+The client injects the bearer token, normalizes list responses (`data: null →
+  []`), attempts a one-time `/api/auth/refresh` on `401`, retries the original
+  request once, and clears the session if refresh fails.
 - **Client/session state** — Zustand store
   ([`features/auth/store.ts`](../frontend/src/features/auth/store.ts)) holds
-  token, user, theme (`dark | light | neon`) and preferred currency. The session
-  is **persisted to `localStorage` with an explicit expiry**, so reloads do not
-  force re-login until the token TTL elapses.
+  the short-lived access token, user, theme (`dark | light | neon`) and
+  preferred currency. The access-token session is **persisted to `localStorage`
+  with an explicit expiry**; the longer-lived refresh token lives only in a
+  secure HttpOnly cookie and is never exposed to JavaScript.
 - **Presentation** — TailwindCSS with CSS-variable theming, `shadcn/ui`-style
   primitives, Recharts for allocation/performance charts.
 - **Forms** — React Hook Form + Zod. Currency is a constrained dropdown
@@ -204,6 +208,7 @@ maintained by triggers.
 
 ```mermaid
 erDiagram
+  users ||--o{ refresh_tokens : has
   users ||--o{ transactions : owns
   users ||--o{ dividends : owns
   users ||--o{ password_reset_tokens : has
@@ -216,7 +221,18 @@ erDiagram
     citext email UK
     varchar name
     text password_hash
+    int failed_login_attempts
+    timestamptz first_failed_login_at
+    timestamptz locked_until
     timestamptz created_at
+  }
+  refresh_tokens {
+    uuid id PK
+    uuid user_id FK
+    text token_hash UK
+    timestamptz expires_at
+    timestamptz revoked_at
+    text replaced_by_token_hash
   }
   assets {
     uuid id PK
@@ -268,10 +284,10 @@ user delete. Indexes support the hot read paths
 (`transactions(user_id, transaction_date DESC)`,
 `asset_prices(asset_id, timestamp DESC)`).
 
-> Deviation from SPEC §10: the implementation adds `users.name`,
-> `asset_prices.previous_close` (for daily-change calc) and an
-> `exchange_rates` table and `password_reset_tokens` table beyond the spec's
-> column lists.
+> Deviation from SPEC §10: the implementation adds `users.name`, user auth-state
+> lockout columns, `asset_prices.previous_close` (for daily-change calc), and
+> the `exchange_rates`, `password_reset_tokens`, and `refresh_tokens` tables
+> beyond the spec's column lists.
 
 ---
 
@@ -287,16 +303,20 @@ sequenceDiagram
   participant DB as Postgres
   B->>API: POST /api/auth/login {email, password}
   API->>S: Login(email, password)
-  S->>DB: GetUserByEmail
+  S->>DB: GetUserByEmail + lockout state
   S->>S: Argon2id verify(password, hash)
+  S->>DB: store hashed refresh token
   S->>S: Issue JWT (HS256, TTL=JWT_ACCESS_TTL)
-  S-->>API: {accessToken, expiresIn, user}
-  API-->>B: 200
-  B->>B: persist session in localStorage with expiry
+  S-->>API: {accessToken, expiresIn, user} + raw refresh token
+  API-->>B: 200 + Set-Cookie refresh_token(HttpOnly)
+  B->>B: persist access token in localStorage with expiry
 ```
 
 Auth endpoints are rate-limited (`5 requests / 10s`). The access token TTL
-(default 15m) drives the client-side session expiry.
+(default 15m) drives the client-side session expiry; `/api/auth/refresh`
+rotates the DB-backed refresh token and issues a new access token when the old
+one expires. After 5 failed logins within 15 minutes, the account is locked for
+15 minutes.
 
 ### 8.2 Portfolio snapshot (read path)
 
@@ -352,13 +372,19 @@ Aligned with the workspace security rule pack.
 - **Passwords** — Argon2id (`auth/password.go`), parameters from config
   (`ARGON2_*`), never stored or logged in plaintext.
 - **Tokens** — JWT issued/verified in `auth/jwt.go`; `JWT_SECRET` must be ≥ 32
-  chars (validated at boot). Stateless `Bearer` auth via `JWTAuth` middleware.
+  chars (validated at boot). Stateless `Bearer` auth via `JWTAuth` middleware
+  plus DB-backed, hashed refresh tokens rotated on use and revoked on logout.
 - **Transport / CORS** — explicit origin allowlist (`CORS_ORIGINS`),
-  `AllowCredentials: false`, method/header allowlists.
+  `AllowCredentials: true`, method/header allowlists so the SPA can send the
+  HttpOnly refresh-token cookie.
+- **Cookies** — refresh token cookie is `HttpOnly`, configurable by env for
+  `Secure`, `SameSite`, name, path and domain; scoped to the auth routes by
+  default (`/api/auth`).
 - **CSP & headers** — nginx sets a strict CSP (`default-src 'self'`,
   `img-src 'self' data:`, `object-src 'none'`, `frame-ancestors 'none'`),
   `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options: DENY`.
-- **Rate limiting** — counter-based middleware on auth endpoints.
+- **Rate limiting / lockout** — counter-based middleware on auth endpoints plus
+  per-account lockout after repeated failed logins.
 - **Input handling** — JSON decoding with `DisallowUnknownFields`, decimal/UUID/
   RFC3339 parsing with explicit error codes, parameterized SQL only.
 - **DB transport** — `sslmode` required outside development (config validation).
@@ -380,7 +406,8 @@ and should not be changed without security sign-off.
 ## 10. Configuration and environments
 
 - Root [`.env`](../.env) / [`.env.example`](../.env.example) hold compose-level
-  vars (`POSTGRES_*`, `JWT_*`, `CORS_ORIGINS`, `FRONTEND_PORT`).
+  vars (`POSTGRES_*`, `JWT_*`, refresh-cookie settings, `CORS_ORIGINS`,
+  `FRONTEND_PORT`).
 - Backend reads its config via env (see [`backend/.env.example`](../backend/.env.example));
   `godotenv` loads a local `.env` in development.
 - `ENV=development` relaxes the `sslmode` requirement, enables Gin debug mode,

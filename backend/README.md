@@ -23,6 +23,11 @@ Important variables:
 - `JWT_AUDIENCE`
 - `JWT_ACCESS_TTL`
 - `JWT_REFRESH_TTL`
+- `REFRESH_COOKIE_NAME`
+- `REFRESH_COOKIE_PATH`
+- `REFRESH_COOKIE_DOMAIN`
+- `REFRESH_COOKIE_SAME_SITE`
+- `REFRESH_COOKIE_SECURE`
 - `CORS_ORIGINS`
 
 Do not commit `.env` or any real secrets.
@@ -43,6 +48,7 @@ Main routes:
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/refresh`
 - `POST /api/auth/logout`
 - `POST /api/auth/password-reset/request`
 - `POST /api/auth/password-reset/confirm`
@@ -65,6 +71,11 @@ Main routes:
 
 - Password reset returns a raw token only in `development` mode to keep local
   testing possible without email delivery.
+- Login and registration issue a short-lived access token in JSON plus a
+  hashed, DB-backed refresh token in a secure HttpOnly cookie. Logout revokes
+  the refresh token server-side.
+- Failed login attempts are tracked per account; 5 failures within 15 minutes
+  lock the account for 15 minutes.
 - Users now have a `name` field, returned in auth responses and used by the
   frontend welcome UI.
 - Live market data currently uses:

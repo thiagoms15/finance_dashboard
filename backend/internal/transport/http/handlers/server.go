@@ -50,7 +50,7 @@ func NewRouter(cfg config.Config, service *service.AppService, tokens *auth.Toke
 		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-ID"},
 		AllowMethods:     []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		ExposeHeaders:    []string{"X-Request-ID"},
-		AllowCredentials: false,
+		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
 
@@ -67,6 +67,7 @@ func NewRouter(cfg config.Config, service *service.AppService, tokens *auth.Toke
 	{
 		authGroup.POST("/register", server.register)
 		authGroup.POST("/login", server.login)
+		authGroup.POST("/refresh", server.refresh)
 		authGroup.POST("/logout", server.logout)
 		authGroup.POST("/password-reset/request", server.passwordResetRequest)
 		authGroup.POST("/password-reset/confirm", server.passwordResetConfirm)
@@ -110,7 +111,7 @@ func (s *Server) register(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, output)
+	s.writeAuthResponse(c, http.StatusCreated, output)
 }
 
 func (s *Server) login(c *gin.Context) {
@@ -123,11 +124,25 @@ func (s *Server) login(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, output)
+	s.writeAuthResponse(c, http.StatusOK, output)
 }
 
 func (s *Server) logout(c *gin.Context) {
+	if err := s.service.Logout(c.Request.Context(), s.refreshTokenFromCookie(c)); err != nil {
+		writeError(c, err)
+		return
+	}
+	s.clearRefreshCookie(c)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) refresh(c *gin.Context) {
+	output, err := s.service.RefreshSession(c.Request.Context(), s.refreshTokenFromCookie(c))
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	s.writeAuthResponse(c, http.StatusOK, output)
 }
 
 func (s *Server) passwordResetRequest(c *gin.Context) {
@@ -465,6 +480,10 @@ func writeError(c *gin.Context, err error) {
 		writeErrorMessage(c, http.StatusBadRequest, "invalid_input", err.Error())
 	case errors.Is(err, service.ErrInvalidCredentials):
 		writeErrorMessage(c, http.StatusUnauthorized, "invalid_credentials", err.Error())
+	case errors.Is(err, service.ErrInvalidSession):
+		writeErrorMessage(c, http.StatusUnauthorized, "invalid_session", err.Error())
+	case isAccountLocked(err):
+		writeErrorMessage(c, http.StatusTooManyRequests, "account_locked", err.Error())
 	case errors.Is(err, repository.ErrNotFound):
 		writeErrorMessage(c, http.StatusNotFound, "not_found", err.Error())
 	default:
@@ -479,4 +498,60 @@ func writeErrorMessage(c *gin.Context, status int, code, message string) {
 			"message": message,
 		},
 	})
+}
+
+func (s *Server) writeAuthResponse(c *gin.Context, status int, output service.LoginOutput) {
+	s.setRefreshCookie(c, output.RefreshToken, output.RefreshExpiresAt)
+	c.JSON(status, output)
+}
+
+func (s *Server) refreshTokenFromCookie(c *gin.Context) string {
+	token, _ := c.Cookie(s.cfg.RefreshCookieName)
+	return token
+}
+
+func (s *Server) setRefreshCookie(c *gin.Context, token string, expiresAt time.Time) {
+	maxAge := int(time.Until(expiresAt).Seconds())
+	if maxAge < 0 {
+		maxAge = 0
+	}
+	c.SetSameSite(cookieSameSite(s.cfg.RefreshCookieSameSiteMode()))
+	c.SetCookie(
+		s.cfg.RefreshCookieName,
+		token,
+		maxAge,
+		s.cfg.RefreshCookiePath,
+		s.cfg.RefreshCookieDomain,
+		s.cfg.RefreshCookieSecure,
+		true,
+	)
+}
+
+func (s *Server) clearRefreshCookie(c *gin.Context) {
+	c.SetSameSite(cookieSameSite(s.cfg.RefreshCookieSameSiteMode()))
+	c.SetCookie(
+		s.cfg.RefreshCookieName,
+		"",
+		-1,
+		s.cfg.RefreshCookiePath,
+		s.cfg.RefreshCookieDomain,
+		s.cfg.RefreshCookieSecure,
+		true,
+	)
+}
+
+func cookieSameSite(mode string) http.SameSite {
+	switch strings.ToLower(mode) {
+	case "strict":
+		return http.SameSiteStrictMode
+	case "none":
+		return http.SameSiteNoneMode
+	default:
+		return http.SameSiteLaxMode
+	}
+}
+
+func isAccountLocked(err error) bool {
+	var lockedErr service.AccountLockedError
+	return errors.As(err, &lockedErr)
 }

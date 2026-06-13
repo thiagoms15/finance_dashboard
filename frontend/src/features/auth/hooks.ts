@@ -21,6 +21,15 @@ export function useRegister() {
   });
 }
 
+export function useLogout() {
+  const clearAuth = useSessionStore((state) => state.clearAuth);
+
+  return useMutation({
+    mutationFn: api.logout,
+    onSettled: () => clearAuth()
+  });
+}
+
 export function useRequestPasswordReset() {
   return useMutation({
     mutationFn: api.requestPasswordReset

@@ -2,6 +2,7 @@ import { NavLink, Outlet } from "react-router-dom";
 
 import { Button } from "../ui/primitives";
 import { useSessionStore } from "../../features/auth/store";
+import { useLogout } from "../../features/auth/hooks";
 import { displayName } from "./displayName";
 
 const navItems = [
@@ -14,8 +15,8 @@ const navItems = [
 
 export function AppShell() {
   const user = useSessionStore((state) => state.user);
-  const clearAuth = useSessionStore((state) => state.clearAuth);
   const name = displayName(user?.name, user?.email);
+  const logout = useLogout();
 
   return (
     <div className="min-h-screen px-4 py-6 md:px-6">
@@ -46,8 +47,12 @@ export function AppShell() {
             ))}
           </nav>
           <div className="mt-8 flex flex-col gap-3">
-            <Button className="bg-rose-400 hover:bg-rose-300" onClick={clearAuth}>
-              Sign out
+            <Button
+              className="bg-rose-400 hover:bg-rose-300"
+              disabled={logout.isPending}
+              onClick={() => logout.mutate()}
+            >
+              {logout.isPending ? "Signing out..." : "Sign out"}
             </Button>
           </div>
         </aside>

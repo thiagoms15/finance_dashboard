@@ -71,6 +71,22 @@ func (m *TokenManager) ParseAccessToken(tokenString string) (*Claims, error) {
 }
 
 func GeneratePasswordResetToken() (rawToken, hash string, err error) {
+	return generateOpaqueToken()
+}
+
+func GenerateRefreshToken() (rawToken, hash string, err error) {
+	return generateOpaqueToken()
+}
+
+func GeneratePasswordResetTokenFromRaw(rawToken string) (string, string, error) {
+	return generateOpaqueTokenFromRaw(rawToken)
+}
+
+func GenerateRefreshTokenFromRaw(rawToken string) (string, string, error) {
+	return generateOpaqueTokenFromRaw(rawToken)
+}
+
+func generateOpaqueToken() (rawToken, hash string, err error) {
 	b := make([]byte, 32)
 	if _, err = rand.Read(b); err != nil {
 		return "", "", fmt.Errorf("generate reset token: %w", err)
@@ -82,7 +98,7 @@ func GeneratePasswordResetToken() (rawToken, hash string, err error) {
 	return rawToken, hash, nil
 }
 
-func GeneratePasswordResetTokenFromRaw(rawToken string) (string, string, error) {
+func generateOpaqueTokenFromRaw(rawToken string) (string, string, error) {
 	if rawToken == "" {
 		return "", "", fmt.Errorf("token is required")
 	}

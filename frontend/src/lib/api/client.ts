@@ -17,7 +17,10 @@ type RequestOptions = {
   method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
   auth?: boolean;
+  credentials?: RequestCredentials;
 };
+
+let refreshPromise: Promise<boolean> | null = null;
 
 function listResponse<T>(payload: ApiListResponse<T> | null | undefined): ApiListResponse<T> {
   return {
@@ -25,8 +28,8 @@ function listResponse<T>(payload: ApiListResponse<T> | null | undefined): ApiLis
   };
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const token = useSessionStore.getState().token;
+async function executeRequest(path: string, options: RequestOptions = {}, tokenOverride?: string | null) {
+  const token = tokenOverride ?? useSessionStore.getState().token;
   const headers: Record<string, string> = {
     "Content-Type": "application/json"
   };
@@ -38,8 +41,51 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: options.method ?? "GET",
     headers,
-    body: options.body ? JSON.stringify(options.body) : undefined
+    body: options.body ? JSON.stringify(options.body) : undefined,
+    credentials: options.credentials
   });
+
+  return response;
+}
+
+async function refreshAccessToken() {
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = (async () => {
+    const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      credentials: "include"
+    });
+
+    if (!response.ok) {
+      useSessionStore.getState().clearAuth();
+      return false;
+    }
+
+    const payload = (await response.json()) as LoginResponse;
+    useSessionStore.getState().setAuth(payload.accessToken, payload.user, payload.expiresIn);
+    return true;
+  })().finally(() => {
+    refreshPromise = null;
+  });
+
+  return refreshPromise;
+}
+
+async function request<T>(path: string, options: RequestOptions = {}, allowRefresh = true): Promise<T> {
+  let response = await executeRequest(path, options);
+
+  if (response.status === 401 && options.auth !== false && allowRefresh) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) {
+      response = await executeRequest(path, options, useSessionStore.getState().token);
+    }
+  }
 
   if (response.status === 401) {
     useSessionStore.getState().clearAuth();
@@ -61,9 +107,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
 export const api = {
   login: (body: { email: string; password: string }) =>
-    request<LoginResponse>("/auth/login", { method: "POST", body, auth: false }),
+    request<LoginResponse>("/auth/login", { method: "POST", body, auth: false, credentials: "include" }),
   register: (body: { name: string; email: string; password: string }) =>
-    request<LoginResponse>("/auth/register", { method: "POST", body, auth: false }),
+    request<LoginResponse>("/auth/register", { method: "POST", body, auth: false, credentials: "include" }),
+  logout: () =>
+    request<{ ok: true }>("/auth/logout", { method: "POST", auth: false, credentials: "include" }, false),
   requestPasswordReset: (body: { email: string }) =>
     request<{ ok: true; resetToken?: string }>("/auth/password-reset/request", {
       method: "POST",
@@ -81,10 +129,14 @@ export const api = {
   createAsset: (body: CreateAssetRequest) => request<Asset>("/assets", { method: "POST", body }),
   asset: (id: string) => request<Asset>(`/assets/${id}`),
   assetIcon: async (id: string) => {
-    const token = useSessionStore.getState().token;
-    const response = await fetch(`${API_BASE_URL}/assets/${id}/icon`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}
-    });
+    let response = await executeRequest(`/assets/${id}/icon`);
+
+    if (response.status === 401) {
+      const refreshed = await refreshAccessToken();
+      if (refreshed) {
+        response = await executeRequest(`/assets/${id}/icon`, {}, useSessionStore.getState().token);
+      }
+    }
 
     if (response.status === 401) {
       useSessionStore.getState().clearAuth();

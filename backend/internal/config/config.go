@@ -20,6 +20,11 @@ type Config struct {
 	JWTAudience           string        `env:"JWT_AUDIENCE" envDefault:"finance-frontend"`
 	JWTAccessTTL          time.Duration `env:"JWT_ACCESS_TTL" envDefault:"15m"`
 	JWTRefreshTTL         time.Duration `env:"JWT_REFRESH_TTL" envDefault:"168h"`
+	RefreshCookieName     string        `env:"REFRESH_COOKIE_NAME" envDefault:"refresh_token"`
+	RefreshCookiePath     string        `env:"REFRESH_COOKIE_PATH" envDefault:"/api/auth"`
+	RefreshCookieDomain   string        `env:"REFRESH_COOKIE_DOMAIN"`
+	RefreshCookieSameSite string        `env:"REFRESH_COOKIE_SAME_SITE" envDefault:"Lax"`
+	RefreshCookieSecure   bool          `env:"REFRESH_COOKIE_SECURE" envDefault:"false"`
 	Argon2Time            uint32        `env:"ARGON2_TIME" envDefault:"1"`
 	Argon2Memory          uint32        `env:"ARGON2_MEMORY" envDefault:"65536"`
 	Argon2Threads         uint8         `env:"ARGON2_THREADS" envDefault:"4"`
@@ -56,6 +61,12 @@ func (c Config) Validate() error {
 	if len(c.JWTSecret) < 32 {
 		return errors.New("JWT_SECRET must be at least 32 characters")
 	}
+	if strings.TrimSpace(c.RefreshCookieName) == "" {
+		return errors.New("REFRESH_COOKIE_NAME is required")
+	}
+	if strings.TrimSpace(c.RefreshCookiePath) == "" {
+		return errors.New("REFRESH_COOKIE_PATH is required")
+	}
 
 	if strings.TrimSpace(c.DatabaseURL) == "" {
 		return errors.New("DATABASE_URL is required")
@@ -66,6 +77,16 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+func (c Config) RefreshCookieSameSiteMode() string {
+	mode := strings.ToLower(strings.TrimSpace(c.RefreshCookieSameSite))
+	switch mode {
+	case "strict", "none":
+		return mode
+	default:
+		return "lax"
+	}
 }
 
 func (c Config) AllowedOrigins() []string {

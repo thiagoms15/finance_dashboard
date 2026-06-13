@@ -42,7 +42,7 @@ func (s *PostgresStore) CreateUser(ctx context.Context, name, email, passwordHas
 	row := s.db.QueryRow(ctx, `
 		INSERT INTO users (name, email, password_hash)
 		VALUES ($1, $2, $3)
-		RETURNING id, name, email, password_hash, created_at, updated_at
+		RETURNING id, name, email, password_hash, failed_login_attempts, first_failed_login_at, locked_until, created_at, updated_at
 	`, strings.TrimSpace(name), strings.ToLower(strings.TrimSpace(email)), passwordHash)
 
 	return scanUser(row)
@@ -50,7 +50,7 @@ func (s *PostgresStore) CreateUser(ctx context.Context, name, email, passwordHas
 
 func (s *PostgresStore) GetUserByEmail(ctx context.Context, email string) (domain.User, error) {
 	row := s.db.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, created_at, updated_at
+		SELECT id, name, email, password_hash, failed_login_attempts, first_failed_login_at, locked_until, created_at, updated_at
 		FROM users
 		WHERE email = $1
 	`, strings.ToLower(strings.TrimSpace(email)))
@@ -133,6 +133,153 @@ func (s *PostgresStore) ConsumePasswordResetToken(ctx context.Context, tokenHash
 	}
 
 	return userID, nil
+}
+
+func (s *PostgresStore) CreateRefreshToken(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+		VALUES ($1, $2, $3)
+	`, userID, tokenHash, expiresAt)
+	return err
+}
+
+func (s *PostgresStore) RotateRefreshToken(ctx context.Context, tokenHash, newTokenHash string, expiresAt time.Time) (domain.User, error) {
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return domain.User{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	row := tx.QueryRow(ctx, `
+		SELECT u.id, u.name, u.email, u.password_hash, u.failed_login_attempts, u.first_failed_login_at, u.locked_until, u.created_at, u.updated_at
+		FROM refresh_tokens rt
+		JOIN users u ON u.id = rt.user_id
+		WHERE rt.token_hash = $1
+		  AND rt.revoked_at IS NULL
+		  AND rt.expires_at > now()
+		FOR UPDATE
+	`, tokenHash)
+	user, err := scanUser(row)
+	if err != nil {
+		return domain.User{}, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE refresh_tokens
+		SET revoked_at = now(),
+		    replaced_by_token_hash = $2
+		WHERE token_hash = $1
+	`, tokenHash, newTokenHash); err != nil {
+		return domain.User{}, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+		VALUES ($1, $2, $3)
+	`, user.ID, newTokenHash, expiresAt); err != nil {
+		return domain.User{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.User{}, err
+	}
+
+	return user, nil
+}
+
+func (s *PostgresStore) RevokeRefreshToken(ctx context.Context, tokenHash string) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE refresh_tokens
+		SET revoked_at = now()
+		WHERE token_hash = $1
+		  AND revoked_at IS NULL
+		  AND expires_at > now()
+	`, tokenHash)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) ResetLoginFailures(ctx context.Context, userID uuid.UUID) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE users
+		SET failed_login_attempts = 0,
+		    first_failed_login_at = NULL,
+		    locked_until = NULL
+		WHERE id = $1
+	`, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) RecordFailedLogin(ctx context.Context, userID uuid.UUID, now time.Time, window, lockDuration time.Duration) (*time.Time, error) {
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		attempts    int
+		firstFailed *time.Time
+		lockedUntil *time.Time
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT failed_login_attempts, first_failed_login_at, locked_until
+		FROM users
+		WHERE id = $1
+		FOR UPDATE
+	`, userID).Scan(&attempts, &firstFailed, &lockedUntil); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if lockedUntil != nil && lockedUntil.After(now) {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return lockedUntil, nil
+	}
+
+	if firstFailed == nil || firstFailed.Add(window).Before(now) {
+		attempts = 1
+		firstFailed = &now
+	} else {
+		attempts++
+	}
+
+	var newLockedUntil *time.Time
+	if attempts >= 5 {
+		lockUntil := now.Add(lockDuration)
+		newLockedUntil = &lockUntil
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE users
+		SET failed_login_attempts = $2,
+		    first_failed_login_at = $3,
+		    locked_until = $4
+		WHERE id = $1
+	`, userID, attempts, firstFailed, newLockedUntil); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return newLockedUntil, nil
 }
 
 func (s *PostgresStore) ListAssets(ctx context.Context, search string, limit int) ([]domain.Asset, error) {
@@ -381,7 +528,17 @@ func (s *PostgresStore) UpsertExchangeRate(ctx context.Context, rate domain.Exch
 
 func scanUser(row interface{ Scan(dest ...any) error }) (domain.User, error) {
 	var user domain.User
-	err := row.Scan(&user.ID, &user.Name, &user.Email, &user.PasswordHash, &user.CreatedAt, &user.UpdatedAt)
+	err := row.Scan(
+		&user.ID,
+		&user.Name,
+		&user.Email,
+		&user.PasswordHash,
+		&user.FailedLoginAttempts,
+		&user.FirstFailedLoginAt,
+		&user.LockedUntil,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.User{}, ErrNotFound

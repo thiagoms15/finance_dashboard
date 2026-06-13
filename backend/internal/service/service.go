@@ -20,7 +20,21 @@ import (
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrInvalidInput       = errors.New("invalid input")
+	ErrInvalidSession     = errors.New("invalid session")
 )
+
+const (
+	loginFailureWindow = 15 * time.Minute
+	lockoutDuration    = 15 * time.Minute
+)
+
+type AccountLockedError struct {
+	LockedUntil time.Time
+}
+
+func (e AccountLockedError) Error() string {
+	return fmt.Sprintf("account locked until %s", e.LockedUntil.UTC().Format(time.RFC3339))
+}
 
 type Store interface {
 	CreateUser(ctx context.Context, name, email, passwordHash string) (domain.User, error)
@@ -29,6 +43,11 @@ type Store interface {
 	UpdateUserName(ctx context.Context, userID uuid.UUID, name string) error
 	CreatePasswordResetToken(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) error
 	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (uuid.UUID, error)
+	CreateRefreshToken(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) error
+	RotateRefreshToken(ctx context.Context, tokenHash, newTokenHash string, expiresAt time.Time) (domain.User, error)
+	RevokeRefreshToken(ctx context.Context, tokenHash string) error
+	ResetLoginFailures(ctx context.Context, userID uuid.UUID) error
+	RecordFailedLogin(ctx context.Context, userID uuid.UUID, now time.Time, window, lockDuration time.Duration) (*time.Time, error)
 	ListAssets(ctx context.Context, search string, limit int) ([]domain.Asset, error)
 	GetAssetByID(ctx context.Context, id uuid.UUID) (domain.Asset, error)
 	CreateAsset(ctx context.Context, asset domain.Asset) (domain.Asset, error)
@@ -61,10 +80,12 @@ type RegisterInput struct {
 }
 
 type LoginOutput struct {
-	AccessToken string      `json:"accessToken"`
-	TokenType   string      `json:"tokenType"`
-	ExpiresIn   int64       `json:"expiresIn"`
-	User        domain.User `json:"user"`
+	AccessToken       string      `json:"accessToken"`
+	TokenType         string      `json:"tokenType"`
+	ExpiresIn         int64       `json:"expiresIn"`
+	User              domain.User `json:"user"`
+	RefreshToken      string      `json:"-"`
+	RefreshExpiresAt  time.Time   `json:"-"`
 }
 
 type TransactionInput struct {
@@ -120,10 +141,11 @@ func (s *AppService) Register(ctx context.Context, input RegisterInput) (LoginOu
 		return LoginOutput{}, err
 	}
 
-	return s.createLoginOutput(user)
+	return s.createLoginOutput(ctx, user)
 }
 
 func (s *AppService) Login(ctx context.Context, email, password string) (LoginOutput, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
 	user, err := s.store.GetUserByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
@@ -132,15 +154,67 @@ func (s *AppService) Login(ctx context.Context, email, password string) (LoginOu
 		return LoginOutput{}, err
 	}
 
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now().UTC()) {
+		return LoginOutput{}, AccountLockedError{LockedUntil: *user.LockedUntil}
+	}
+
 	ok, err := s.hasher.Verify(password, user.PasswordHash)
 	if err != nil {
 		return LoginOutput{}, err
 	}
 	if !ok {
+		lockedUntil, err := s.store.RecordFailedLogin(ctx, user.ID, time.Now().UTC(), loginFailureWindow, lockoutDuration)
+		if err != nil {
+			return LoginOutput{}, err
+		}
+		if lockedUntil != nil {
+			return LoginOutput{}, AccountLockedError{LockedUntil: *lockedUntil}
+		}
 		return LoginOutput{}, ErrInvalidCredentials
 	}
 
-	return s.createLoginOutput(user)
+	if err := s.store.ResetLoginFailures(ctx, user.ID); err != nil {
+		return LoginOutput{}, err
+	}
+
+	return s.createLoginOutput(ctx, user)
+}
+
+func (s *AppService) RefreshSession(ctx context.Context, refreshToken string) (LoginOutput, error) {
+	_, tokenHash, err := auth.GenerateRefreshTokenFromRaw(refreshToken)
+	if err != nil {
+		return LoginOutput{}, ErrInvalidSession
+	}
+
+	rawToken, newTokenHash, err := auth.GenerateRefreshToken()
+	if err != nil {
+		return LoginOutput{}, err
+	}
+	refreshExpiresAt := time.Now().UTC().Add(s.refreshTTL)
+	user, err := s.store.RotateRefreshToken(ctx, tokenHash, newTokenHash, refreshExpiresAt)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return LoginOutput{}, ErrInvalidSession
+		}
+		return LoginOutput{}, err
+	}
+
+	return s.createAccessOutput(user, rawToken, refreshExpiresAt)
+}
+
+func (s *AppService) Logout(ctx context.Context, refreshToken string) error {
+	if strings.TrimSpace(refreshToken) == "" {
+		return nil
+	}
+
+	_, tokenHash, err := auth.GenerateRefreshTokenFromRaw(refreshToken)
+	if err != nil {
+		return nil
+	}
+	if err := s.store.RevokeRefreshToken(ctx, tokenHash); err != nil && !errors.Is(err, repository.ErrNotFound) {
+		return err
+	}
+	return nil
 }
 
 func (s *AppService) RequestPasswordReset(ctx context.Context, email string) (string, error) {
@@ -349,7 +423,20 @@ func (s *AppService) PortfolioPerformance(ctx context.Context, userID uuid.UUID,
 	return portfolio.BuildPerformanceSeries(txns, strings.ToUpper(preferredCurrency), converter(rates, preferredCurrency)), nil
 }
 
-func (s *AppService) createLoginOutput(user domain.User) (LoginOutput, error) {
+func (s *AppService) createLoginOutput(ctx context.Context, user domain.User) (LoginOutput, error) {
+	refreshToken, refreshTokenHash, err := auth.GenerateRefreshToken()
+	if err != nil {
+		return LoginOutput{}, err
+	}
+	refreshExpiresAt := time.Now().UTC().Add(s.refreshTTL)
+	if err := s.store.CreateRefreshToken(ctx, user.ID, refreshTokenHash, refreshExpiresAt); err != nil {
+		return LoginOutput{}, err
+	}
+
+	return s.createAccessOutput(user, refreshToken, refreshExpiresAt)
+}
+
+func (s *AppService) createAccessOutput(user domain.User, refreshToken string, refreshExpiresAt time.Time) (LoginOutput, error) {
 	token, err := s.tokenManager.CreateAccessToken(user.ID, user.Email, s.accessTTL)
 	if err != nil {
 		return LoginOutput{}, err
@@ -357,10 +444,12 @@ func (s *AppService) createLoginOutput(user domain.User) (LoginOutput, error) {
 
 	user.PasswordHash = ""
 	return LoginOutput{
-		AccessToken: token,
-		TokenType:   "Bearer",
-		ExpiresIn:   int64(s.accessTTL.Seconds()),
-		User:        user,
+		AccessToken:      token,
+		TokenType:        "Bearer",
+		ExpiresIn:        int64(s.accessTTL.Seconds()),
+		User:             user,
+		RefreshToken:     refreshToken,
+		RefreshExpiresAt: refreshExpiresAt,
 	}, nil
 }
 
